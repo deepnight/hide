@@ -1,6 +1,6 @@
 package hide.comp;
 
-class Scene extends Component implements h3d.IDrawable {
+class Scene extends hide.comp.Component implements h3d.IDrawable {
 
 	static var UID = 0;
 
@@ -25,12 +25,13 @@ class Scene extends Component implements h3d.IDrawable {
 	public var editor : hide.comp.SceneEditor;
 	var unFocusedTime = 0.;
 
+	public static var cache : h3d.prim.ModelCache = new h3d.prim.ModelCache();
+
 	public function new(config, parent, el) {
 		super(parent,el);
 		this.config = config;
 		element.addClass("hide-scene-container");
 		canvas = cast new Element("<canvas class='hide-scene' style='width:100%;height:100%'/>").appendTo(element)[0];
-		trace(canvas);
 
 		canvas.addEventListener("mousemove",function(_) canvas.focus());
 		canvas.addEventListener("mouseleave",function(_) canvas.blur());
@@ -48,15 +49,25 @@ class Scene extends Component implements h3d.IDrawable {
 			c();
 		cleanup = [];
 		ide.unregisterUpdate(sync);
-		@:privateAccess s2d.window.removeResizeEvent(s2d.checkResize);
-		engine.dispose();
-		@:privateAccess engine.driver = null;
-		untyped canvas.__scene = null;
-		canvas = null;
+		if (s2d != null) {
+			@:privateAccess s2d.window.removeResizeEvent(s2d.checkResize);
+			s2d.dispose();
+		}
+		if ( s3d != null )
+			s3d.dispose();
+		if (engine != null && engine.driver != null) {
+			engine.dispose();
+			@:privateAccess engine.driver = null;
+		}
+		if (canvas != null) {
+			untyped canvas.__scene = null;
+			canvas = null;
+		}
 		if( h3d.Engine.getCurrent() == engine ) @:privateAccess h3d.Engine.CURRENT = null;
 		untyped js.Browser.window.$_ = null; // jquery can sometimes leak s2d
 		@:privateAccess haxe.NativeStackTrace.lastError = null; // possible leak there
-		window.dispose();
+		if ( window != null )
+			window.dispose();
 	}
 
 	public function addListener(f) {
@@ -76,6 +87,7 @@ class Scene extends Component implements h3d.IDrawable {
 		window = @:privateAccess new hxd.Window(canvas);
 		window.propagateKeyEvents = true;
 		window.setCurrent();
+		h3d.impl.MemoryManager.enableTrackAlloc(Ide.inst.ideConfig.trackGpuAlloc);
 		engine = @:privateAccess new h3d.Engine();
 		@:privateAccess engine.resCache.set(Scene, this);
 		engine.backgroundColor = 0xFF111111;
@@ -289,7 +301,7 @@ class Scene extends Component implements h3d.IDrawable {
 	public function loadModel( path : String, mainScene = false, reload = false ) {
 		checkCurrent();
 		var lib = loadHMD(path, false, reload);
-		return lib.makeObject(loadTexture.bind(path));
+		return lib.makeObject(texturePath -> loadTexture(path, texturePath));
 	}
 
 	public function loadAnimation( path : String ) {
@@ -351,7 +363,7 @@ class Scene extends Component implements h3d.IDrawable {
 		checkCurrent();
 		var path = resolvePath(modelPath, texturePath);
 		if( path == null ) {
-			ide.error("Could not load texture " + { modelPath : modelPath, texturePath : texturePath });
+			ide.quickError("Could not load texture " + { modelPath : modelPath, texturePath : texturePath });
 			return null;
 		}
 		var t = texCache.get(path);
@@ -361,15 +373,17 @@ class Scene extends Component implements h3d.IDrawable {
 		}
 		var relPath = StringTools.startsWith(path, ide.resourceDir) ? path.substr(ide.resourceDir.length+1) : path;
 
-		var res = try hxd.res.Loader.currentInstance.load(relPath) catch( e : hxd.res.NotFound ) {
+		function loadUncompressed() {
 			var bytes = sys.io.File.getBytes(path);
-			hxd.res.Any.fromBytes(path, bytes);
+			return hxd.res.Any.fromBytes(path, bytes);
+		}
+
+		var res = try hxd.res.Loader.currentInstance.load(relPath) catch( e : hxd.res.NotFound ) {
+			loadUncompressed();
 		};
 
-		if (uncompressed) {
-			var bytes = sys.io.File.getBytes(path);
-			res = hxd.res.Any.fromBytes(path, bytes);
-		}
+		if (uncompressed)
+			loadUncompressed();
 
 		if( onReady == null ) onReady = function(_) {};
 		try {
@@ -379,7 +393,8 @@ class Scene extends Component implements h3d.IDrawable {
 			t.setName( ide.makeRelative(path));
 			texCache.set(path, t);
 		} catch( error : Dynamic ) {
-			throw "Could not load texure " + texturePath + ":\n" + Std.string(error);
+			ide.quickError("Could not load texure " + texturePath + ":\n" + Std.string(error));
+			return null;
 		};
 		return t;
 	}
@@ -529,7 +544,7 @@ class Scene extends Component implements h3d.IDrawable {
 		function pathRec(p : String) {
 			try {
 				var prefab = hxd.res.Loader.currentInstance.load(p).toPrefab().load();
-				var mats = prefab.getAll(hrt.prefab.Material);
+				var mats = prefab.findAll(hrt.prefab.Material);
 				for ( m in mats )
 					materials.push({ path : p, mat : m});
 			} catch ( e : hxd.res.NotFound ) {

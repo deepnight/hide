@@ -119,6 +119,12 @@ class Image extends FileView {
 		}
 
 		var compressionInfo = element.find(".compression-infos");
+		var nativeFormat = new Element('<div class="field">
+		<label>Native format :</label>
+		<label class="native-format">Unknown</label>
+		</div>');
+		compressionInfo.append(nativeFormat);
+
 		addField(compressionInfo, "Format :", "Compression format used to compress texture", "select-format", ["none", "BC1", "BC2", "BC3", "RGBA", "R16F", "RG16F", "RGBA16F", "R32F", "RG32F", "RGBA32F", "R16U", "RG16U", "RGBA16U"] );
 
 		var alphaField = new Element('<div class="field alpha">
@@ -288,35 +294,32 @@ class Image extends FileView {
 
 		var resetCompression = element.find(".reset-compression");
 		resetCompression.on("click", function(_) {
-			if (!sys.FileSystem.exists(propsFilePath))
-				ide.message('The file ${propsFilePath} does not exist !');
+			if (sys.FileSystem.exists(propsFilePath)) {
+				var rulesObj = haxe.Json.parse(sys.io.File.getContent(propsFilePath));
 
-			var rulesObj = haxe.Json.parse(sys.io.File.getContent(propsFilePath));
+				var fsConvertObj = Reflect.getProperty(rulesObj, "fs.convert");
+				if (fsConvertObj != null && Reflect.getProperty(fsConvertObj, state.path) != null) {
+					if(!ide.confirm('Do you really want to remove ${state.path} from ${propsFilePath} ?'))
+						return;
 
-			var fsConvertObj = Reflect.getProperty(rulesObj, "fs.convert");
-			if (fsConvertObj == null || Reflect.getProperty(fsConvertObj, state.path) == null)
-				ide.message('The file ${propsFilePath} does not contain compression rule for ${state.path} !');
-			else {
-				if(!ide.confirm('Do you really want to remove ${state.path} from ${propsFilePath} ?'))
-					return;
+					Reflect.deleteField(fsConvertObj, state.path);
 
-				Reflect.deleteField(fsConvertObj, state.path);
+					if (Reflect.fields(fsConvertObj).length == 0)
+						Reflect.deleteField(rulesObj, "fs.convert");
 
-				if (Reflect.fields(fsConvertObj).length == 0)
-					Reflect.deleteField(rulesObj, "fs.convert");
-
-				if (Reflect.fields(rulesObj).length == 0) {
-					sys.FileSystem.deleteFile(propsFilePath);
-					updateImageCompressionInfos();
-					replaceImage(ide.getPath(state.path));
-					return;
+					if (Reflect.fields(rulesObj).length == 0) {
+						sys.FileSystem.deleteFile(propsFilePath);
+						updateImageCompressionInfos();
+						replaceImage(ide.getPath(state.path));
+						return;
+					}
 				}
-			}
 
-			var bytes = new haxe.io.BytesOutput();
-			var data = haxe.Json.stringify(rulesObj, "\t");
-			bytes.writeString(data);
-			hxd.File.saveBytes(propsFilePath, bytes.getBytes());
+				var bytes = new haxe.io.BytesOutput();
+				var data = haxe.Json.stringify(rulesObj, "\t");
+				bytes.writeString(data);
+				hxd.File.saveBytes(propsFilePath, bytes.getBytes());
+			}
 
 			updateImageCompressionInfos();
 			replaceImage(ide.getPath(state.path));
@@ -583,6 +586,7 @@ class Image extends FileView {
 		var useAlpha = compressionInfo.find(".use-alpha");
 		var alpha = compressionInfo.find(".alpha-threshold");
 		var maxSize = compressionInfo.find(".max-size");
+		var nativeFormat = compressionInfo.find(".native-format");
 
 		var dirPos = state.path.lastIndexOf("/");
 		var name = dirPos < 0 ? state.path : state.path.substr(dirPos + 1);
@@ -593,7 +597,11 @@ class Image extends FileView {
 		@:privateAccess fs.convert.loadConfig(state.path);
 
 		var localEntry = @:privateAccess new hxd.fs.LocalFileSystem.LocalEntry(fs, name, state.path, Ide.inst.getPath(state.path));
-		fs.convert.run(localEntry);
+
+		try {
+			fs.convert.run(localEntry);
+		}
+		catch (e) onError();
 
 		@:privateAccess var texConvRule = fs.convert.getConvertRule(state.path);
 		var convertRuleEmpty = texConvRule == null || texConvRule.cmd == null || texConvRule.cmd.params == null;
@@ -637,6 +645,8 @@ class Image extends FileView {
 
 		var uncompTWeight = element.find(".uncomp-tex-weight");
 		uncompTWeight.text('Uncompressed texture weight : ${getTextureMemSize(state.path)} mb');
+
+		nativeFormat.text(getTextureNativeFormat(state.path).getName());
 	}
 
 	public function replaceImage(path : String) {
@@ -709,11 +719,14 @@ class Image extends FileView {
 			comp.originalFilename = name;
 
 			if (useAlpha.is(':checked'))
-				comp.params = { format:format.val().toString(), mips:mips.is(':checked'), size:Std.parseInt(size.val()) };
-			else
 				comp.params = { alpha:Std.parseInt(alpha.val()), format:format.val().toString(), mips:mips.is(':checked'), size:Std.parseInt(size.val()) };
+			else
+				comp.params = { format:format.val().toString(), mips:mips.is(':checked'), size:Std.parseInt(size.val()) };
 
-			comp.convert();
+			try {
+				comp.convert();
+			}
+			catch(e) onError();
 		}
 		else {
 			tmpPath = state.path;
@@ -739,6 +752,15 @@ class Image extends FileView {
 		var t = res.toTexture();
 
 		return @:privateAccess floatToStringPrecision(t.mem.memSize(t) / (1024 * 1024));
+	}
+
+	public function getTextureNativeFormat(path: String) {
+		var p = ide.getPath(path);
+		var bytes = sys.io.File.getBytes(p);
+		var res = hxd.res.Any.fromBytes(p, bytes);
+		var t = res.toTexture();
+
+		return t.format;
 	}
 
 	public function floatToStringPrecision(number:Float, ?precision=2) {
@@ -768,6 +790,10 @@ class Image extends FileView {
 		sliderBmp.endFill();
 
 		updateSliderVisual();
+	}
+
+	public function onError() {
+		Ide.inst.quickError('Can\'t load texture with this compression parameters, original texture is loaded instead!');
 	}
 
 	static var _ = FileTree.registerExtension(Image,hide.Ide.IMG_EXTS.concat(["envd","envs"]),{ icon : "picture-o" });

@@ -40,6 +40,7 @@
 	"key.search" : "Ctrl-F",
 	"key.rename" : "F2",
 	"key.selectAll" : "Ctrl-A",
+	"key.selectInvert" : "Ctrl-I",
 	"key.playPause" : "Space",
 
 	// view keys
@@ -66,6 +67,8 @@
 	"key.cdb.moveAhead" : "Alt-Right",
 
 	"key.cdb.globalSeek" : "Ctrl-P",
+	"key.cdb.sheetSeekIds" : "Ctrl-O",
+	"key.cdb.globalSeekIds" : "Ctrl-Shift-O",
 
 	// Scene editor config
 	"key.sceneeditor.focus": "F",
@@ -84,8 +87,12 @@
 	"key.sceneeditor.rotationMode": "E",
 	"key.sceneeditor.scalingMode": "R",
 	"key.sceneeditor.toggleSnap": "X",
+	"key.sceneeditor.switchMode" : "Space",
 
 	"key.shadergraph.hide" : "H",
+	"key.shadergraph.comment" : "C",
+	"key.graph.openAddMenu" : "Space",
+
 
 
 	// cdb config
@@ -146,7 +153,7 @@
 	// l3d config
 	"sceneeditor.colors": {
 	},
-	"sceneeditor.filterTypes": ["terrain", "model", "polygon", "box", "instance", "light", "meshSpray"],
+	"sceneeditor.filterTypes": ["terrain", "heightmap", "model", "polygon", "box", "instance", "light", "meshSpray", "advancedDecal"],
 	"sceneeditor.tags": [ { "id": "tag", "color": "#802000" } ],
 	"sceneeditor.camera.moveSpeed": 1.5,
 	"sceneeditor.gridSize": 100,

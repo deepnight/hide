@@ -3,47 +3,56 @@ using Lambda;
 
 class Instance extends Object3D {
 
-	public function new(?parent) {
-		super(parent);
-		type = "instance";
+	var instance : Prefab;
+	var model : h3d.scene.Object;
+	var icon : h2d.Object;
+
+	public function new(parent, shared: ContextShared) {
+		super(parent, shared);
 		props = {};
 	}
 
 	#if editor
-	override function makeInstance(ctx:Context):Context {
-		var ctx = super.makeInstance(ctx);
+	override function makeObject(parent3d: h3d.scene.Object) : h3d.scene.Object {
+
 		var kind = getRefSheet(this);
 		var unknown = kind == null || kind.idx == null;
 
 		var modelPath = unknown ? null : findModelPath(kind.sheet, kind.idx.obj);
 		if(modelPath != null) {
 			try {
-				if(hrt.prefab.Library.getPrefabType(modelPath) != null) {
-					var ref = ctx.shared.loadPrefab(modelPath);
+				if(hrt.prefab.Prefab.getPrefabType(modelPath) != null) {
+					var ref = hxd.res.Loader.currentInstance.load(modelPath).to(hrt.prefab.Resource).load();
 					if(ref != null) {
-						var prevShared = ctx.shared;
-						ctx.shared = ctx.shared.cloneRef(this, modelPath);
-						ref.make(ctx);
-						ctx.shared = prevShared;
+						var sh = new hrt.prefab.ContextShared(findFirstLocal2d(), parent3d);
+						sh.currentPath = source;
+						sh.parentPrefab = this;
+						sh.customMake = this.shared.customMake;
+						#if editor
+						ref.setEditor(shared.editor, shared.scene);
+						#end
+
+						instance = ref.make(sh);
+						return instance.findFirstLocal3d();
 					}
 				}
 				else {
-					var obj = ctx.loadModel(modelPath);
-					obj.name = name;
-					ctx.local3d.addChild(obj);
+					model = shared.loadModel(modelPath);
+					model.name = name;
+					return model;
 				}
 			} catch( e : hxd.res.NotFound ) {
-				ctx.shared.onError(e);
+				shared.onError(e);
 			}
 		}
-		return ctx;
+        return super.makeObject(parent3d);
 	}
 
-	override function makeInteractive(ctx:Context):hxd.SceneEvents.Interactive {
-		var int = super.makeInteractive(ctx);
+	override function makeInteractive():hxd.SceneEvents.Interactive {
+		var int = super.makeInteractive();
 		if( int == null ) {
 			// no meshes ? do we have an icon instead...
-			var follow = Std.downcast(ctx.local2d, h2d.ObjectFollower);
+			var follow = Std.downcast(findFirstLocal2d(), h2d.ObjectFollower);
 			if( follow != null ) {
 				var bmp = Std.downcast(follow.getChildAt(0), h2d.Bitmap);
 				if( bmp != null ) {
@@ -55,22 +64,6 @@ class Instance extends Object3D {
 			}
 		}
 		return int;
-	}
-
-	override function removeInstance(ctx:Context):Bool {
-		if(!super.removeInstance(ctx))
-			return false;
-		if(ctx.local2d != null ) {
-			var p = parent;
-			var pctx = null;
-			while( p != null ) {
-				pctx = ctx.shared.getContexts(p)[0];
-				if( pctx != null ) break;
-				p = p.parent;
-			}
-			if( ctx.local2d != (pctx == null ? ctx.shared.root2d : pctx.local2d) ) ctx.local2d.remove();
-		}
-		return true;
 	}
 
 	// ---- statics
@@ -128,7 +121,7 @@ class Instance extends Object3D {
 		function filter(f: String) {
 			if(f != null) {
 				var lower = f.toLowerCase();
-				if(StringTools.endsWith(lower, ".fbx") || hrt.prefab.Library.getPrefabType(lower) != null)
+				if(StringTools.endsWith(lower, ".fbx") || hrt.prefab.Prefab.getPrefabType(lower) != null)
 					return f;
 			}
 			return null;
@@ -155,10 +148,17 @@ class Instance extends Object3D {
 		return path;
 	}
 
-	override function getHideProps() : HideProps {
+	override function editorRemoveInstance() : Void {
+		if (icon != null) {
+			icon.remove();
+		}
+		super.editorRemoveInstance();
+	}
+
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "circle", name : "Instance" };
 	}
 	#end
 
-	static var _ = Library.register("instance", Instance);
+	static var _ = Prefab.register("instance", Instance);
 }

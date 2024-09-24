@@ -33,7 +33,13 @@ class FileSelect extends Component {
 					path = ide.getClipboard();
 					onChange();
 				}},
-				{ label : "Open in explorer", enabled : fpath != null, click : function() Sys.command("explorer.exe",["/select,"+fpath.split("/").join("\\")]) },
+				{ label : "Open in Explorer", enabled : fpath != null, click : function(){
+					Ide.showFileInExplorer(fpath);
+				} },
+				{ label : "Open in Resources", enabled : path != null, click : function() {
+					ide.showFileInResources(path);
+				}},
+
 			]);
 			return false;
 		}

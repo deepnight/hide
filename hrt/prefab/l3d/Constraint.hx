@@ -7,6 +7,8 @@ class Constraint extends Prefab {
 	@:s public var positionOnly(default,null) : Bool;
 
 	public function apply( root : h3d.scene.Object ) {
+		if (object == null || target == null)
+			return null;
 		var srcObj = root.getObjectByName(object.split(".").pop());
 		var targetObj = root.getObjectByName(target.split(".").pop());
 		if( srcObj != null && targetObj != null ){
@@ -16,24 +18,22 @@ class Constraint extends Prefab {
 		return srcObj;
 	}
 
-	override function makeInstance( ctx : Context ) {
-		if(!enabled) return ctx;
-		var srcObj = ctx.locateObject(object);
-		var targetObj = ctx.locateObject(target);
+	override function makeInstance() {
+		var srcObj = locateObject(object);
+		var targetObj = locateObject(target);
 		if( srcObj != null && targetObj != null ){
 			srcObj.follow = targetObj;
 			srcObj.followPositionOnly = positionOnly;
 		}
-		return ctx;
 	}
 
 	#if editor
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "lock", name : "Constraint" };
 	}
 
-	override function edit(ctx:EditContext) {
-		var curObj = ctx.rootContext.locateObject(object);
+	override function edit(ctx:hide.prefab.EditContext) {
+		var curObj = getRoot().locateObject(object);
 		var props = ctx.properties.add(new hide.Element('
 			<dl>
 				<dt title="Object to constraint">Object</dt><dd><select field="object"><option value="">-- Choose --</option></select>
@@ -42,8 +42,8 @@ class Constraint extends Prefab {
 			</dl>
 		'),this, function(_) {
 			if( curObj != null ) curObj.follow = null;
-			makeInstance(ctx.rootContext);
-			curObj = ctx.rootContext.locateObject(object);
+			apply(shared.root3d);
+			curObj = getRoot().locateObject(object);
 		});
 
 		for( select in [props.find("[field=object]"), props.find("[field=target]")] ) {
@@ -57,6 +57,6 @@ class Constraint extends Prefab {
 	}
 	#end
 
-	static var _ = Library.register("constraint", Constraint);
+	static var _ = Prefab.register("constraint", Constraint);
 
 }

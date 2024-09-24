@@ -32,9 +32,26 @@ class Model extends FileView {
 	var lastSelectedObject : h3d.scene.Object = null;
 
 	var highlightSelection : Bool = true;
+	var shader = new h3d.shader.FixedColor(0xffffff);
+	var shader2 = new h3d.shader.FixedColor(0xff8000);
 
 	override function save() {
+
 		if(!modified) return;
+
+		// Save render props
+		if (Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false) && sceneEditor.renderPropsRoot != null)
+			sceneEditor.renderPropsRoot.save();
+
+		for (o in obj.findAll(o -> Std.downcast(o, h3d.scene.Mesh))) {
+
+			var hmd = Std.downcast(o.primitive, h3d.prim.HMDModel);
+			if (hmd == null)
+				continue;
+
+			h3d.prim.ModelDatabase.current.saveModelProps(o.name, hmd);
+		}
+
 		// Save current Anim data
 		if( currentAnimation != null ) {
 			var hideData = loadProps();
@@ -99,8 +116,14 @@ class Model extends FileView {
 					<div class="tabs">
 						<div class="tab expand" name="Model" icon="sitemap">
 							<div class="hide-block">
-							<input type="button" style="width:312px" value="Save render props"/>
-								<div class="hide-scene-tree hide-list">
+							<div class="render-props-edition">
+								<div class="hide-toolbar">
+									<div class="toolbar-label">
+										<div class="icon ico ico-sun-o"></div>
+										Render props
+									</div>
+								</div>
+								<div class="hide-scenetree"></div>
 								</div>
 							</div>
 							<div class="props hide-scroll">
@@ -120,7 +143,10 @@ class Model extends FileView {
 		tabs = new hide.comp.Tabs(null,element.find(".tabs"));
 		eventList = element.find(".event-editor");
 
-		root = new hrt.prefab.Library();
+		root = new hrt.prefab.Prefab(null, null);
+		var def = new hrt.prefab.Prefab(null, null);
+		new hrt.prefab.RenderProps(def, null).name = "renderer";
+		var l = new hrt.prefab.Light(def, null);
 		sceneEditor = new hide.comp.SceneEditor(this, root);
 		sceneEditor.editorDisplay = false;
 		sceneEditor.onRefresh = onRefresh;
@@ -136,25 +162,27 @@ class Model extends FileView {
 			modified = false;
 		});
 
+		sceneEditor.view.keys.register("undo", function() undo.undo());
+		sceneEditor.view.keys.register("redo", function() undo.redo());
+
 		element.find(".hide-scene-tree").first().append(sceneEditor.tree.element);
+		element.find(".render-props-edition").find('.hide-scenetree').append(sceneEditor.renderPropsTree.element);
 		element.find(".props").first().append(sceneEditor.properties.element);
 		element.find(".heaps-scene").first().append(sceneEditor.scene.element);
 		sceneEditor.view.keys.register("sceneeditor.focus", {name: "Focus Selection", category: "Scene"},
 			function() {if (lastSelectedObject != null) refreshSelectionHighlight(lastSelectedObject);});
 		sceneEditor.tree.element.addClass("small");
-		element.find("input[value=\"Save render props\"]").click(function(_) {
-			if( !canSave() )
-				return;
-			var toSave = root.children[0];
-			@:privateAccess toSave.save();
+		sceneEditor.renderPropsTree.element.addClass("small");
 
-			save();
-		});
+		var rpEditionvisible = Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false);
+		setRenderPropsEditionVisibility(rpEditionvisible);
 	}
 
 	override function onActivate() {
 		if (tools != null)
 			tools.refreshToggles();
+
+		setRenderPropsEditionVisibility(Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false));
 	}
 
 	inline function get_scene() return sceneEditor.scene;
@@ -162,6 +190,8 @@ class Model extends FileView {
 	var def = false;
 	function selectMaterial( m : h3d.mat.Material ) {
 		refreshSelectionHighlight(null);
+
+		highlightMaterial(m);
 
 		var properties = sceneEditor.properties;
 		properties.clear();
@@ -276,11 +306,15 @@ class Model extends FileView {
 				var matName = mat.mat.name;
 				hide.Ide.inst.openFile(Reflect.field(mat, "path"), null, (view) -> {
 					var prefabView : hide.view.Prefab.Prefab = cast view;
+
 					haxe.Timer.delay(function() {
-						for (p in @:privateAccess prefabView.data.flatten(hrt.prefab.Prefab)) {
-							if (p.name == matName) {
+						for (p in @:privateAccess prefabView.data.flatten(hrt.prefab.Material)) {
+							if (p != null && p.name == matName) {
 								prefabView.sceneEditor.selectElements([p]);
-								@:privateAccess prefabView.sceneEditor.focusSelection();
+								@:privateAccess
+								if (p.previewSphere != null) {
+									prefabView.sceneEditor.focusObjects([p.previewSphere]);
+								}
 							}
 						}
 					}, 500);
@@ -333,6 +367,7 @@ class Model extends FileView {
 				Reflect.deleteField((m.props:Dynamic), "__refMode");
 			}
 			h3d.mat.MaterialSetup.current.saveMaterialProps(m, defaultProps);
+			Ide.inst.quickMessage('Properties for mat (${m.name}) had been saved');
 		};
 		saveButton.click(saveCallback);
 		properties.add(matLibrary, m);
@@ -351,15 +386,16 @@ class Model extends FileView {
 		e.find(".save").click(saveCallback);
 	}
 
+	static var lodPow : Float = 0.3;
 	var selectedJoint : String = null;
+	var selectedMesh : h3d.scene.Mesh = null;
 	var displayJoints = null;
 	function selectObject( obj : h3d.scene.Object ) {
 		if ( Std.isOfType(obj, h3d.scene.Skin.Joint) ) {
 			selectedJoint = obj.name;
-			if ( displayJoints.isDown() )
+			if ( @:privateAccess sceneEditor.jointsGraphics != null )
 				sceneEditor.setJoints(true, selectedJoint);
-		}
-		else
+		} else
 			selectedJoint = null;
 
 		var properties = sceneEditor.properties;
@@ -401,6 +437,13 @@ class Model extends FileView {
 
 		var transform = obj.defaultTransform;
 
+		var mesh = Std.downcast(obj, h3d.scene.Mesh);
+		var vertexFormat = '';
+		if ( mesh != null ) {
+			for ( i in mesh.primitive.buffer.format.getInputs() )
+				vertexFormat += ' ' + i.name;
+			vertexFormat = '<dt>Vertex format</dt><dd>$vertexFormat</dd>';
+		}
 		var e = properties.add(new Element('
 			<div class="group" name="Properties">
 				<dl>
@@ -419,15 +462,14 @@ class Model extends FileView {
 					<dt>Bones</dt><dd>$bonesCount</dd>
 					<dt>Vertexes</dt><dd>$vertexCount</dd>
 					<dt>Triangles</dt><dd>$triangleCount</dd>
-					' + if (transform != null) {
-						var bounds = obj.getBounds();
+					' + vertexFormat +
+					if (transform != null) {
 						var size : h3d.col.Point = roundVec(obj.getBounds().getSize());
 
 						size.x = hxd.Math.max(0, size.x);
 						size.y = hxd.Math.max(0, size.y);
 						size.z = hxd.Math.max(0, size.z);
 
-						var mesh = Std.downcast(obj, h3d.scene.Mesh);
 						var meshSize : h3d.col.Point = null;
 						if (mesh != null) {
 							var bounds = mesh.primitive.getBounds().clone();
@@ -461,6 +503,187 @@ class Model extends FileView {
 			</div>
 			<br/>
 		'),obj);
+
+		var mesh = Std.downcast(obj, h3d.scene.Mesh);
+		var hmd = mesh != null ? Std.downcast(mesh.primitive, h3d.prim.HMDModel) : null;
+		selectedMesh = mesh;
+
+		if (mesh != null && hmd != null) {
+			// Blendshapes edition
+			if (@:privateAccess hmd.blendshape != null) {
+				var blendShape = new Element('
+				<div class="group" name="Blend Shapes">
+					<dt>Index</dt><dd><input id="bs-index" type="range" min="0" max="${@:privateAccess hmd.blendshape.getBlendshapeCount() - 1}" step="1" field=""/></dd>
+					<dt>Amount</dt><dd><input id="bs-amount" type="range" min="0" max="1" field=""/></dd>
+				</div>');
+
+				properties.add(blendShape, null, function(pname){
+					@:privateAccess hmd.blendshape.setBlendshapeAmount(blendShape.find("#bs-index").val(),blendShape.find("#bs-amount").val());
+				});
+			}
+
+			// LODs edition
+			if (@:privateAccess hmd.lodCount() > 0) {
+				var lodsEl = new Element('
+					<div class="group lods" name="LODs">
+						<dt>LOD Count</dt><dd>${hmd.lodCount()}</dd>
+						<dt>Force display LOD</dt>
+						<dd>
+							<select id="select-lods">
+								<option value="-1">None</option>
+								${[ for(idx in 0...hmd.lodCount()) '<option value="${idx}">LOD ${idx}</option>'].join("")}
+							<select>
+						</dd>
+						<dt>LOD Vertexes</dt><dd id="vertexes-count">-</dd>
+						<div class="lods-line">
+							<div class="line"></div>
+							<div class="cursor">
+								<div class="cursor-line"></div>
+								<p class="ratio">100%</p>
+							</div>
+						</div>
+						<div id="buttons">
+							<input type="button" value="Reset defaults" id="reset-lods"/>
+						</div>
+					</div>
+				');
+				properties.add(lodsEl, null, null);
+
+				function getLodRatioFromIdx(idx : Int) {
+					var lodConfig = hmd.getLodConfig();
+					if (idx == 0) return 1.;
+					if (idx >= hmd.lodCount()) return 0.;
+					return lodConfig[idx - 1];
+				}
+
+				function getLodRatioFromPx(px : Float) {
+					var ratio = 1 - (px / lodsEl.find(".line").width());
+					return Math.pow(ratio, 1.0 / lodPow);
+				}
+
+				function getLodRatioPowedFromIdx(idx : Int) {
+					var lodConfig = hmd.getLodConfig();
+					var prev = idx == 0 ? 1 : hxd.Math.pow(lodConfig[idx - 1] , lodPow);
+
+					return (Math.abs(prev - hxd.Math.pow(lodConfig[idx], lodPow)));
+				}
+
+				function startDrag(onMove: js.jquery.Event->Void, onStop: js.jquery.Event->Void) {
+					var el = new Element(element[0].ownerDocument.body);
+					el.on("mousemove.lods", onMove);
+					el.on("mouseup.lods", function(e: js.jquery.Event) {
+						el.off("mousemove.lods");
+						el.off("mouseup.lods");
+						e.preventDefault();
+						e.stopPropagation();
+						onStop(e);
+					});
+				}
+
+				function refreshLodLine() {
+					var areas = lodsEl.find(".area");
+					var lineEl = lodsEl.find(".line");
+					var idx = 0;
+					for (area in areas) {
+						var areaEl = new Element(area);
+						areaEl.css({ width : '${lineEl.width() * getLodRatioPowedFromIdx(idx)}px' });
+
+						var roundedRatio = Std.int(Math.pow(getLodRatioFromIdx(idx), lodPow) * 10000.) / 100.;
+						areaEl.find('#percent').text('${roundedRatio}%');
+						idx++;
+					}
+				}
+
+				var resetLod = lodsEl.find('#reset-lods');
+				resetLod.on("click", function() {
+					var prevConfig = @:privateAccess hmd.lodConfig?.copy();
+					@:privateAccess hmd.lodConfig = null;
+					Ide.inst.quickMessage('Lod config reset for object : ${obj.name}');
+					refreshLodLine();
+
+					undo.change(Custom(function(undo) {
+						if (undo) {
+							@:privateAccess hmd.lodConfig = prevConfig;
+						} else {
+							@:privateAccess hmd.lodConfig = null;
+						}
+
+						refreshLodLine();
+					}));
+				});
+
+				var selectLod = lodsEl.find("select");
+				selectLod.on("change", function(){
+					hmd.forcedLod = Std.int(lodsEl.find("select").val());
+
+					var lodsCountEl = lodsEl.find("#vertexes-count");
+					if (hmd.forcedLod >= 0) {
+						var lodVertexesCount = @:privateAccess hmd.lods[hmd.forcedLod].vertexCount;
+						lodsCountEl.text(lodVertexesCount);
+					}
+					else {
+						lodsCountEl.text('-');
+					}
+				});
+
+				var lodsLine = lodsEl.find(".line");
+				for (idx in 0...hmd.lodCount()) {
+					var areaEl = new Element('
+					<div class="area">
+						<p>LOD&nbsp${idx}</p>
+						<p id="percent">-%</p>
+					</div>');
+
+					if (idx == hmd.lodCount() - 1)
+						areaEl.css({ flex : 1 });
+
+					lodsLine.append(areaEl);
+					refreshLodLine();
+
+					var widthHandle = 10;
+					areaEl.on("mousemove", function(e:js.jquery.Event) {
+						if ((e.offsetX <= widthHandle && idx != 0) || (areaEl.width() - e.offsetX) <= widthHandle && idx != hmd.lodCount() - 1)
+							areaEl.css({ cursor : 'w-resize' });
+						else
+							areaEl.css({ cursor : 'default' });
+					});
+
+					areaEl.on("mousedown", function(e:js.jquery.Event) {
+						var firstHandle = e.offsetX <= widthHandle && idx != 0;
+						var secondHandle = areaEl.width() - e.offsetX <= widthHandle && idx != hmd.lodCount() - 1;
+
+						if (firstHandle || secondHandle) {
+							var currIdx = secondHandle ? idx : idx - 1;
+							var prevConfig = @:privateAccess hmd.lodConfig?.copy();
+							var newConfig = hmd.getLodConfig()?.copy();
+							var limits = [ getLodRatioFromIdx(currIdx + 2),  getLodRatioFromIdx(currIdx)];
+
+							startDrag(function(e) {
+								var newRatio = getLodRatioFromPx(e.screenX - lodsLine.offset().left);
+								newRatio = hxd.Math.clamp(newRatio, limits[0], limits[1]);
+								newConfig[currIdx] = newRatio;
+								@:privateAccess hmd.lodConfig = newConfig;
+								refreshLodLine();
+							}, function(e) {
+
+								undo.change(Custom(function(undo) {
+									if (undo) {
+										@:privateAccess hmd.lodConfig = prevConfig;
+									} else {
+										@:privateAccess hmd.lodConfig = newConfig;
+									}
+
+									refreshLodLine();
+								}));
+							});
+						}
+					});
+				}
+
+				var cursor = lodsEl.find(".cursor");
+				cursor.css({top: '${lodsLine.position().top + 11}px'});
+			}
+		}
 
 		var select = e.find(".follow");
 		for( path in getNamedObjects(obj) ) {
@@ -507,22 +730,24 @@ class Model extends FileView {
 
 		materials = selectedObj.getMaterials();
 
-		var shader = new h3d.shader.FixedColor(0xffffff);
-		var shader2 = new h3d.shader.FixedColor(0xff8000);
 		for( m in materials ) {
 			if( m.name != null && StringTools.startsWith(m.name,"$UI.") )
 				continue;
-			var p = m.allocPass("highlight");
-			p.culling = None;
-			p.depthWrite = false;
-			p.depthTest = LessEqual;
-			p.addShader(shader);
-			var p = m.allocPass("highlightBack");
-			p.culling = None;
-			p.depthWrite = false;
-			p.depthTest = Always;
-			p.addShader(shader2);
+			highlightMaterial(m);
 		}
+	}
+
+	function highlightMaterial(m : h3d.mat.Material) {
+		var p = m.allocPass("highlight");
+		p.culling = None;
+		p.depthWrite = false;
+		p.depthTest = LessEqual;
+		p.addShader(shader);
+		var p = m.allocPass("highlightBack");
+		p.culling = None;
+		p.depthWrite = false;
+		p.depthTest = Always;
+		p.addShader(shader2);
 	}
 
 	function getNamedObjects( ?exclude : h3d.scene.Object ) {
@@ -587,13 +812,13 @@ class Model extends FileView {
 	function onRefresh() {
 		this.saveDisplayKey = "Model:" + state.path;
 
-		sceneEditor.loadSavedCameraController3D(true);
+		sceneEditor.loadCam3D();
 
 		// Remove current instancied render props
-		sceneEditor.context.local3d.removeChildren();
+		sceneEditor.root3d.removeChildren();
 
 		// Remove current library to create a new one with the actual render prop
-		root = new hrt.prefab.Library();
+		root = new hrt.prefab.Prefab(null, null);
 		for (c in @:privateAccess sceneEditor.sceneData.children)
 			@:privateAccess sceneEditor.sceneData.children.remove(c);
 
@@ -606,11 +831,11 @@ class Model extends FileView {
 		// Create default render props if no render props has been created yet
 		var r = root.getOpt(hrt.prefab.RenderProps, true);
 		if( r == null) {
-			var def = new hrt.prefab.Object3D(root);
+			var def = new hrt.prefab.Object3D(root, null);
 			def.name = "Default Ligthing";
-			var render = new hrt.prefab.RenderProps(def);
+			var render = new hrt.prefab.RenderProps(def, null);
 			render.name = "renderer";
-			var l = new hrt.prefab.Light(def);
+			var l = new hrt.prefab.Light(def, null);
 			l.name = "sunLight";
 			l.kind = Directional;
 			l.power = 1.5;
@@ -623,31 +848,31 @@ class Model extends FileView {
 			l.shadows.mode = Dynamic;
 			l.shadows.size = 1024;
 
-			def.make(sceneEditor.context);
+			def.make(new hrt.prefab.ContextShared());
 
 			r = render;
 			r.applyProps(scene.s3d.renderer);
 		}
 
 		// Apply render props properties on scene
-		var refPrefab = new hrt.prefab.Reference();
-		if( @:privateAccess refPrefab.ref != null ) {
-			var renderProps = @:privateAccess refPrefab.ref.getOpt(hrt.prefab.RenderProps);
+		var refPrefab = new hrt.prefab.Reference(null, null);
+		if( @:privateAccess refPrefab.refInstance != null ) {
+			var renderProps = @:privateAccess refPrefab.refInstance.getOpt(hrt.prefab.RenderProps);
 			if( renderProps != null )
 				renderProps.applyProps(scene.s3d.renderer);
 		}
 
-		plight = root.getAll(hrt.prefab.Light)[0];
+		plight = root.find(hrt.prefab.Light);
 		if( plight != null ) {
-			this.light = sceneEditor.context.shared.contexts.get(plight).local3d;
-			lightDirection = this.light.getLocalDirection();
-		}
+			this.light = hrt.prefab.Object3D.getLocal3d(plight);
 
-		undo.onChange = function() {};
+			if (this.light != null)
+				lightDirection = this.light.getLocalDirection();
+		}
 
 		if (obj != null) {
 			for (m in this.obj.getMeshes()) {
-				if(!m.primitive.buffer.isDisposed())
+				if(m.primitive.buffer != null && !m.primitive.buffer.isDisposed())
 					m.primitive.buffer.dispose();
 			}
 
@@ -708,7 +933,7 @@ class Model extends FileView {
 			sceneEditor.resetCamera();
 		});
 
-		tools.makeToolbar([{id: "camSettings", title : "Camera Settings", icon : "camera", type : Popup((e : hide.Element) -> new hide.comp.CameraControllerEditor(sceneEditor, null,e)) }], null, null);
+		tools.makeToolbar([{id: "camSettings", title : "Camera Settings", icon : "camera", type : Popup((e : hide.Element) -> new hide.comp.CameraControllerEditor(sceneEditor,e)) }], null, null);
 
 		tools.addSeparator();
 
@@ -725,33 +950,21 @@ class Model extends FileView {
 		});
 
 		var toolsDefs : Array<hide.comp.Toolbar.ToolDef> = [];
-		toolsDefs.push({id: "iconVisibility", title : "Toggle 3d icons visibility", icon : "image", type : Toggle((v) -> { hide.Ide.inst.show3DIcons = v; }), defaultValue: true });
-        toolsDefs.push({id: "iconVisibility-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.IconVisibilityPopup(null, e, sceneEditor))});
+
+		toolsDefs.push({id: "showViewportOverlays", title : "Viewport Overlays", icon : "eye", type : Toggle((v) -> { sceneEditor.updateViewportOverlays(); }) });
+		toolsDefs.push({id: "viewportoverlays-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.ViewportOverlaysPopup(e, sceneEditor))});
+
+		//toolsDefs.push({id: "iconVisibility", title : "Toggle 3d icons visibility", icon : "image", type : Toggle((v) -> { hide.Ide.inst.show3DIcons = v; }), defaultValue: true });
+        //toolsDefs.push({id: "iconVisibility-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.IconVisibilityPopup(null, e, sceneEditor))});
 		tools.makeToolbar(toolsDefs);
 
-		tools.addToggle("wireframeToggle", "connectdevelop", "Wireframe",(b) -> {
-			sceneEditor.setWireframe(b);
-		});
-		displayJoints = tools.addToggle("jointsToggle", "connectdevelop", "Joints",(b) -> {
-			sceneEditor.setJoints(b, selectedJoint);
-		});
+		tools.addSeparator();
 
-		tools.addToggle("show-outline","square-o", "Show selection Outline",(b) -> {
-			highlightSelection = b;
-			refreshSelectionHighlight(lastSelectedObject);
-		}, highlightSelection);
-
-		tools.addColor("Background color", function(v) {
-			scene.engine.backgroundColor = v;
-		}, scene.engine.backgroundColor);
+		tools.addPopup(null, "View Modes", (e) -> new hide.comp.SceneEditor.ViewModePopup(e, Std.downcast(@:privateAccess scene.s3d.renderer, h3d.scene.pbr.Renderer), sceneEditor), null);
 
 		tools.addSeparator();
 
-		tools.addPopup(null, "View Modes", (e) -> new hide.comp.SceneEditor.ViewModePopup(null, e, Std.downcast(@:privateAccess scene.s3d.renderer, h3d.scene.pbr.Renderer), sceneEditor), null);
-
-		tools.addSeparator();
-
-		tools.addPopup(null, "Render Props", (e) -> new hide.comp.SceneEditor.RenderPropsPopup(null, e, this, sceneEditor, true, true), null);
+		tools.addPopup(null, "Render Props", (e) -> new hide.comp.SceneEditor.RenderPropsPopup(e, this, sceneEditor, true, true), null);
 
 		tools.addSeparator();
 
@@ -781,10 +994,13 @@ class Model extends FileView {
 		sceneEditor.onResize = buildTimeline;
 		setAnimation(null);
 
-		if ( displayJoints.isDown() )
-			sceneEditor.setJoints(true, null);
+		// Adapt initial camera position to model
+		var camSettings = @:privateAccess sceneEditor.view.getDisplayState("Camera");
+		var isGlobalSettings = Ide.inst.currentConfig.get("sceneeditor.camera.isglobalsettings", false);
+		if (isGlobalSettings)
+			camSettings = Ide.inst.currentConfig.get("sceneeditor.camera.isglobalsettings", false);
 
-		if (sceneEditor.view.getDisplayState("Camera") == null) {
+		if (camSettings == null) {
 			var bnds = new h3d.col.Bounds();
 			var centroid = new h3d.Vector();
 
@@ -962,18 +1178,38 @@ class Model extends FileView {
 				});
 			case 1:
 				var deleteEvent = function(s:String, f:Int){
-					obj.currentAnimation.events[f].remove(s);
-					if(obj.currentAnimation.events[f].length == 0)
-						obj.currentAnimation.events[f] = null;
+					obj.currentAnimation.removeEvent(f, s);
 					buildTimeline();
 					buildEventPanel();
-					modified = true;
+
+					undo.change(Custom(function(undo) {
+						if(undo) {
+							obj.currentAnimation.addEvent(f, s);
+						}
+						else {
+							obj.currentAnimation.removeEvent(f, s);
+						}
+
+						buildTimeline();
+						buildEventPanel();
+					}));
 				}
 				var addEvent = function(s:String, f:Int){
 					obj.currentAnimation.addEvent(f, s);
 					buildTimeline();
 					buildEventPanel();
-					modified = true;
+
+					undo.change(Custom(function(undo) {
+						if(undo) {
+							obj.currentAnimation.removeEvent(f, s);
+						}
+						else {
+							obj.currentAnimation.addEvent(f, s);
+						}
+
+						buildTimeline();
+						buildEventPanel();
+					}));
 				}
 				var frame = Math.round((e.relX / W) * obj.currentAnimation.frameCount);
 				var menuItems : Array<hide.comp.ContextMenu.ContextMenuItem> = [
@@ -1010,15 +1246,38 @@ class Model extends FileView {
 						sceneEditor.view.keys.pushDisable();
 						e.propagate = false;
 					}
-					tf.onFocusLost = function(e){
-						events[i][j] = tf.text;
-						if( tf.text == "" ) {
+					tf.onFocusLost = function(e) {
+						var newName = tf.text;
+						var oldName = events[i][j];
+						events[i][j] = newName;
+						if( newName == "" ) {
 							events[i].splice(j,1);
 							if( events[i].length == 0 ) events[i] = null;
 						}
 						buildTimeline();
 						buildEventPanel();
-						modified = true;
+
+						undo.change(Custom(function(undo) {
+							if(undo) {
+								if (events[i] == null)
+									events[i] = [oldName];
+								else if (events[i][j] != newName)
+									events[i].insert(j, oldName);
+								else
+									events[i][j] = oldName;
+							}
+							else {
+								events[i][j] = newName;
+								if( newName == "" ) {
+									events[i].splice(j,1);
+									if( events[i].length == 0 ) events[i] = null;
+								}
+							}
+
+							buildTimeline();
+							buildEventPanel();
+						}));
+
 						sceneEditor.view.keys.popDisable();
 					}
 					tf.text = event;
@@ -1055,8 +1314,21 @@ class Model extends FileView {
 									dragInter.stopCapture();
 									buildTimeline();
 									buildEventPanel();
-									if( curFrame != startFrame )
-										modified = true;
+									if( curFrame != startFrame ) {
+										undo.change(Custom(function(undo) {
+											if(undo) {
+												events[curFrame].remove(event);
+												events[startFrame].push(event);
+											}
+											else {
+												events[curFrame].push(event);
+												events[startFrame].remove(event);
+											}
+
+											buildTimeline();
+											buildEventPanel();
+										}));
+									}
 								case EMove:
 									var newFrame = Math.round(( (curPos + (e.relX - 2.5) * dragIcon.scaleX ) / W ) * obj.currentAnimation.frameCount);
 									if( newFrame >= 0 && newFrame <= obj.currentAnimation.frameCount ) {
@@ -1101,6 +1373,34 @@ class Model extends FileView {
 		}
 		if( cameraMove != null )
 			cameraMove();
+
+		if (selectedMesh != null) {
+
+			function round(number:Float, ?precision=2): Float
+			{
+				number *= Math.pow(10, precision);
+				return Math.round(number) / Math.pow(10, precision);
+			}
+
+			var screenRatio = @:privateAccess selectedMesh.curScreenRatio;
+			var line = sceneEditor.properties.element.find(".line");
+			var cursor = sceneEditor.properties.element.find(".cursor");
+			if (cursor.length > 0) {
+				cursor?.css({left: '${line.position().left + line.width() * hxd.Math.clamp((1 - hxd.Math.pow(screenRatio, lodPow)), 0, 1)}px'});
+				cursor?.find(".ratio").text('${round(hxd.Math.clamp(hxd.Math.pow(screenRatio, lodPow) * 100, 0, 100), 2)}%');
+			}
+		}
+	}
+
+	public function setRenderPropsEditionVisibility(visible : Bool) {
+		var renderPropsEditionEl = this.element.find('.render-props-edition');
+
+		if (!visible) {
+			renderPropsEditionEl.css({ display : 'none' });
+			return;
+		}
+
+		renderPropsEditionEl.css({ display : 'block' });
 	}
 
 	static var _ = FileTree.registerExtension(Model,["hmd","fbx"],{ icon : "cube" });

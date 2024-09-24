@@ -1,13 +1,14 @@
 package hide;
 
-@:expose
-class Ide {
+class IdeCache {
+	public var getTextureCache : Map<String, h3d.mat.Texture> = [];
 
-	public var currentConfig(get,never) : Config;
-	public var projectDir(get,never) : String;
-	public var resourceDir(get,never) : String;
+	public function new() {};
+}
+@:expose
+class Ide extends hide.tools.IdeData {
+
 	public var initializing(default,null) : Bool;
-	public var appPath(get, null): String;
 
 	public var mouseX : Int = 0;
 	public var mouseY : Int = 0;
@@ -15,28 +16,12 @@ class Ide {
 	public var isWindows(get, never) : Bool;
 	public var isFocused(get, never) : Bool;
 
-	public var database : cdb.Database = new cdb.Database();
 	public var shaderLoader : hide.tools.ShaderLoader;
-	public var fileWatcher : hide.tools.FileWatcher;
 	public var isCDB = false;
 	public var isDebugger = false;
 
 	public var gamePad(default,null) : hxd.Pad;
-
-	var databaseFile : String;
-	var databaseDiff : String;
-	var pakFile : hxd.fmt.pak.FileSystem;
-	var originDataBase : cdb.Database;
-	var dbWatcher : hide.tools.FileWatcher.FileWatchEvent;
-
-	var config : {
-		global : Config,
-		project : Config,
-		user : Config,
-		current : Config,
-	};
-	public var ideConfig(get, never) : hide.Config.HideGlobalConfig;
-	public var projectConfig(get, never) : hide.Config.HideProjectConfig;
+	public var localStorage(get,never) : js.html.Storage;
 
 	var window : nw.Window;
 	var saveMenu : nw.Menu;
@@ -61,6 +46,7 @@ class Ide {
 	static var firstInit = true;
 
 	function new() {
+		super();
 		initPad();
 		isCDB = Sys.getEnv("HIDE_START_CDB") == "1" || nw.App.manifest.name == "CDB";
 		isDebugger = Sys.getEnv("HIDE_DEBUG") == "1";
@@ -74,6 +60,14 @@ class Ide {
 		wait();
 	}
 
+	function get_localStorage() {
+		return js.Browser.window.localStorage;
+	}
+
+	override function getAppDataPath() {
+		return nw.App.dataPath;
+	}
+
 	function initPad() {
 		gamePad = hxd.Pad.createDummy();
 		hxd.Pad.wait((p) -> gamePad = p);
@@ -83,7 +77,7 @@ class Ide {
 		inst = this;
 		window = nw.Window.get();
 		var cwd = Sys.getCwd();
-		config = Config.loadForProject(cwd, cwd+"/res");
+		initConfig(cwd);
 		var current = ideConfig.currentProject;
 		if( StringTools.endsWith(cwd,"package.nw") && sys.FileSystem.exists(cwd.substr(0,-10)+"res") )
 			cwd = cwd.substr(0,-11);
@@ -130,8 +124,6 @@ class Ide {
 
 		if( config.global.get("hide") == null )
 			error("Failed to load defaultProps.json");
-
-		fileWatcher = new hide.tools.FileWatcher();
 
 		if( !sys.FileSystem.exists(current) || !sys.FileSystem.isDirectory(current) ) {
 			if( current != "" ) js.Browser.alert(current+" no longer exists");
@@ -243,7 +235,6 @@ class Ide {
 		new Element(window.window.document).on("dnd_move.vakata.jstree", function(e, data:Dynamic) {
 			var el = (data.helper:hide.Element);
 			var drag = treeDragFun(data,false);
-			trace(drag);
 			var icon = el.find(new Element(".jstree-icon"));
 			el.css(drag ? { filter : "brightness(120%)", opacity : 1 } : { filter : "", opacity : 0.5 });
 			icon.toggleClass("jstree-er", !drag);
@@ -351,7 +342,8 @@ class Ide {
 			content: state.state.content,
 			settings: {
 				// Default to false
-				reorderEnabled : config.user.get('layout.reorderEnabled') == true,
+				reorderEnabled : config.user.get('layout.reorderEnabled', true) == true,
+				constrainDragToHeader : config.user.get('layout.constrainDragToHeader', true) == true,
 				showPopoutIcon : config.user.get('layout.showPopoutIcon') == true,
 				showMaximiseIcon : config.user.get('layout.showMaximiseIcon') == true
 			}
@@ -487,30 +479,6 @@ class Ide {
 		};
 	}
 
-	function get_ideConfig() return cast config.global.source.hide;
-	function get_projectConfig() return cast config.user.source.hide;
-	function get_currentConfig() return config.user;
-
-	function get_appPath() {
-		if( appPath != null )
-			return appPath;
-		var path = js.Node.process.argv[0].split("\\").join("/").split("/");
-		path.pop();
-		var hidePath = path.join("/");
-		if( !sys.FileSystem.exists(hidePath + "/package.json") ) {
-			var prevPath = new haxe.io.Path(hidePath).dir;
-			if( sys.FileSystem.exists(prevPath + "/hide.js") )
-				return appPath = prevPath;
-			// nwjs launch
-			var path = Sys.getCwd().split("\\").join("/");
-			if( sys.FileSystem.exists(path+"/hide.js") )
-				return appPath = path;
-			message("Hide application path was not found");
-			Sys.exit(0);
-		}
-		return appPath = hidePath;
-	}
-
 	public function setClipboard( text : String ) {
 		nw.Clipboard.get().set(text, Text);
 	}
@@ -543,15 +511,6 @@ class Ide {
 				Reflect.deleteField(v, f);
 	}
 
-	public function getPath( relPath : String ) {
-		if( relPath == null )
-			return null;
-		relPath = relPath.split("${HIDE}").join(appPath);
-		if( haxe.io.Path.isAbsolute(relPath) )
-			return relPath;
-		return resourceDir+"/"+relPath;
-	}
-
 	static var textureCacheKey = "TextureCache";
 
 	public function getHideResPath(basePath:String) {
@@ -563,14 +522,17 @@ class Ide {
 		if (fullPath == null)
 			return null;
 
+
 		var engine = h3d.Engine.getCurrent();
-		var cache : Map<String, h3d.mat.Texture> = @:privateAccess engine.resCache.get(textureCacheKey);
+		var cache : IdeCache = cast @:privateAccess engine.resCache.get(IdeCache);
 		if(cache == null) {
-			cache = new Map();
-			@:privateAccess engine.resCache.set(textureCacheKey, cache);
+			cache = new IdeCache();
+			@:privateAccess engine.resCache.set(IdeCache, cache);
 		}
 
-		var tex = cache[fullPath];
+		var texCache = cache.getTextureCache;
+
+		var tex = texCache[fullPath];
 		if (tex != null)
 			return tex;
 
@@ -578,67 +540,13 @@ class Ide {
 		var res = hxd.res.Any.fromBytes(fullPath, data);
 		tex = res.toImage().toTexture();
 
-		cache.set(fullPath, tex);
+		texCache.set(fullPath, tex);
 		return tex;
-	}
-
-	public function resolveCDBValue( path : String, key : Dynamic, obj : Dynamic ) : Dynamic {
-
-		// allow Array as key (first choice)
-		if( Std.isOfType(key,Array) ) {
-			for( v in (key:Array<Dynamic>) ) {
-				var value = resolveCDBValue(path, v, obj);
-				if( value != null ) return value;
-			}
-			return null;
-		}
-		path += "."+key;
-
-		var path = path.split(".");
-		var sheet = database.getSheet(path.shift());
-		if( sheet == null )
-			return null;
-		while( path.length > 0 && sheet != null ) {
-			var f = path.shift();
-			var value : Dynamic;
-			if( f.charCodeAt(f.length-1) == "]".code ) {
-				var parts = f.split("[");
-				f = parts[0];
-				value = Reflect.field(obj, f);
-				if( value != null )
-					value = value[Std.parseInt(parts[1])];
-			} else
- 				value = Reflect.field(obj, f);
-			if( value == null )
-				return null;
-			var current = sheet;
-			sheet = null;
-			for( c in current.columns ) {
-				if( c.name == f ) {
-					switch( c.type ) {
-					case TRef(name):
-						sheet = database.getSheet(name);
-						var ref = sheet.index.get(value);
-						if( ref == null )
-							return null;
-						value = ref.obj;
-					case TProperties, TList:
-						sheet = current.getSub(c);
-					default:
-					}
-					break;
-				}
-			}
-			obj = value;
-		}
-		for( f in path )
-			obj = Reflect.field(obj, f);
-		return obj;
 	}
 
 	var showErrors = true;
 	var errorWindow :Element = null;
-	public function error( e : Dynamic ) {
+	override function error( e : Dynamic ) {
 		if( showErrors && !js.Browser.window.confirm(e) )
 			showErrors = false;
 
@@ -679,31 +587,20 @@ class Ide {
 		js.Browser.console.error(e);
 	}
 
-	public function quickError( e : Dynamic ) {
-		var e = new Element('<div class="globalErrorMessage">${StringTools.htmlEscape(Std.string(e))}</div>');
-		e.appendTo(window.window.document.body);
-		haxe.Timer.delay(() -> e.remove(), 5000);
+	public function quickError( msg : Dynamic, timeoutSeconds : Float = 5.0 ) {
+		var e = new Element('
+		<div class="message error">
+			<div class="icon ico ico-warning"></div>
+			<div class="text">${StringTools.htmlEscape(Std.string(msg))}</div>
+		</div>');
+
+		js.Browser.console.error(msg);
+
+		globalMessage(e, timeoutSeconds);
 	}
 
-	function get_projectDir() return ideConfig.currentProject.split("\\").join("/");
-	function get_resourceDir() return projectDir+"/res";
-
-	function setProject( dir : String ) {
-		fileWatcher.dispose();
-
-		if( dir != ideConfig.currentProject ) {
-			ideConfig.currentProject = dir;
-			ideConfig.recentProjects.remove(dir);
-			ideConfig.recentProjects.unshift(dir);
-			if( ideConfig.recentProjects.length > 10 ) ideConfig.recentProjects.pop();
-			config.global.save();
-		}
-		try {
-			config = Config.loadForProject(projectDir, resourceDir);
-		} catch( e : Dynamic ) {
-			js.Browser.alert(e);
-			return;
-		}
+	override function setProject( dir : String ) {
+		super.setProject(dir);
 
 		setProgress();
 		shaderLoader = new hide.tools.ShaderLoader();
@@ -722,26 +619,11 @@ class Ide {
 		for ( plugin in plugins )
 			loadPlugin(plugin, function() {});
 
-		databaseFile = config.project.get("cdb.databaseFile");
-		databaseDiff = config.user.get("cdb.databaseDiff");
-		var pak = config.project.get("pak.dataFile");
-		pakFile = null;
-		if( pak != null ) {
-			pakFile = new hxd.fmt.pak.FileSystem();
-			try {
-				pakFile.loadPak(getPath(pak));
-			} catch( e : Dynamic ) {
-				error(""+e);
-			}
-		}
 		loadDatabase();
-		dbWatcher = fileWatcher.register(databaseFile,function() {
-			loadDatabase(true);
-			hide.comp.cdb.Editor.refreshAll(true);
-		});
 
 		if( config.project.get("debug.displayErrors")  ) {
 			js.Browser.window.onerror = function(msg, url, line, col, error) {
+				if( error == null ) return true; // some internal chrome errors are only a msg, skip
 				var e = error.stack;
 				e = ~/\(?chrome-extension:\/\/[a-z0-9\-\.\/]+.js:[0-9]+:[0-9]+\)?/g.replace(e,"");
 				e = ~/at ([A-Za-z0-9_\.\$]+)/g.map(e,function(r) { var path = r.matched(1); path = path.split("$hx_exports.").pop().split("$hxClasses.").pop(); return path; });
@@ -859,119 +741,6 @@ class Ide {
 		js.Browser.location.reload();
 	}
 
-	public function fileExists( path : String ) {
-		if( sys.FileSystem.exists(getPath(path)) ) return true;
-		if( pakFile != null && pakFile.exists(path) ) return true;
-		return false;
-	}
-
-	public function getFile( path : String ) {
-		var fullPath = getPath(path);
-		try {
-			return sys.io.File.getBytes(fullPath);
-		} catch( e : Dynamic ) {
-			if( pakFile != null )
-				return pakFile.get(path).getBytes();
-			throw e;
-		}
-	}
-
-	public function getFileText( path : String ) {
-		var fullPath = getPath(path);
-		try {
-			return sys.io.File.getContent(fullPath);
-		} catch( e : Dynamic ) {
-			if( pakFile != null )
-				return pakFile.get(path).getText();
-			throw e;
-		}
-	}
-
-	var lastDBContent = null;
-	function loadDatabase( ?checkExists ) {
-		var exists = fileExists(databaseFile);
-		if( checkExists && !exists )
-			return; // cancel load
-		var loadedDatabase = new cdb.Database();
-		if( !exists ) {
-			database = loadedDatabase;
-			return;
-		}
-		try {
-			lastDBContent = getFileText(databaseFile);
-			loadedDatabase.load(lastDBContent);
-		} catch( e : Dynamic ) {
-			error(e);
-			return;
-		}
-		database = loadedDatabase;
-		if( databaseDiff != null ) {
-			originDataBase = new cdb.Database();
-			lastDBContent = getFileText(databaseFile);
-			originDataBase.load(lastDBContent);
-			if( fileExists(databaseDiff) ) {
-				var d = new cdb.DiffFile();
-				d.apply(database,parseJSON(getFileText(databaseDiff)),config.project.get("cdb.view"));
-			}
-		}
-	}
-
-	public function saveDatabase( ?forcePrefabs ) {
-		hide.comp.cdb.DataFiles.save(function() {
-			if( databaseDiff != null ) {
-				sys.io.File.saveContent(getPath(databaseDiff), toJSON(new cdb.DiffFile().make(originDataBase,database)));
-				fileWatcher.ignorePrevChange(dbWatcher);
-			} else {
-				if( !sys.FileSystem.exists(getPath(databaseFile)) && fileExists(databaseFile) ) {
-					// was loaded from pak, cancel changes
-					loadDatabase();
-					hide.comp.cdb.Editor.refreshAll();
-					return;
-				}
-				lastDBContent = database.save();
-				sys.io.File.saveContent(getPath(databaseFile), lastDBContent);
-				fileWatcher.ignorePrevChange(dbWatcher);
-			}
-		}, forcePrefabs);
-	}
-
-	public function createDBSheet( ?index : Int ) {
-		var value = ask("Sheet name");
-		if( value == "" || value == null ) return null;
-		var s = database.createSheet(value, index);
-		if( s == null ) {
-			error("Name already exists");
-			return null;
-		}
-		saveDatabase();
-		hide.comp.cdb.Editor.refreshAll();
-		return s;
-	}
-
-	public function makeRelative( path : String ) {
-		path = path.split("\\").join("/");
-		if( StringTools.startsWith(path.toLowerCase(), resourceDir.toLowerCase()+"/") )
-			return path.substr(resourceDir.length+1);
-
-		// is already a relative path
-		if( path.charCodeAt(0) != "/".code && path.charCodeAt(1) != ":".code )
-			return path;
-
-		var resParts = resourceDir.split("/");
-		var pathParts = path.split("/");
-		for( i in 0...resParts.length ) {
-			if( pathParts[i].toLowerCase() != resParts[i].toLowerCase() ) {
-				if( pathParts[i].charCodeAt(pathParts[i].length-1) == ":".code )
-					return path; // drive letter change
-				var newPath = pathParts.splice(i, pathParts.length - i);
-				for( k in 0...resParts.length - i )
-					newPath.unshift("..");
-				return newPath.join("/");
-			}
-		}
-		return path;
-	}
-
 	public function getUnCachedUrl( path : String ) {
 		return "file://" + getPath(path) + "?t=" + fileWatcher.getVersion(path);
 	}
@@ -1031,46 +800,15 @@ class Ide {
 			onSelect(dir == "" ? null : (isAbsolute ? dir : makeRelative(dir)));
 			e.remove();
 		}).appendTo(window.window.document.body).click();
-	}
 
-	public function parseJSON( str : String ) : Dynamic {
 		// remove comments
-		str = ~/^[ \t]+\/\/[^\n]*/gm.replace(str, "");
-		return haxe.Json.parse(str);
-	}
 
-	public function toJSON( v : Dynamic ) {
-		var str = haxe.Json.stringify(v, "\t");
-		str = ~/,\n\t+"__id__": [0-9]+/g.replace(str, "");
-		str = ~/\t+"__id__": [0-9]+,\n/g.replace(str, "");
-		return str;
-	}
 
-	public function loadPrefab<T:hrt.prefab.Prefab>( file : String, ?cl : Class<T>, ?checkExists ) : T {
-		if( file == null )
-			return null;
-		var l = hrt.prefab.Library.create(file.split(".").pop().toLowerCase());
-		try {
-			var path = getPath(file);
-			if( checkExists && !sys.FileSystem.exists(path) )
-				return null;
-			l.loadData(parseJSON(sys.io.File.getContent(path)));
-		} catch( e : Dynamic ) {
-			error("Invalid prefab "+file+" ("+e+")");
-			throw e;
-		}
-		if( cl == null )
-			return cast l;
-		return l.get(cl);
-	}
 
-	public function savePrefab( file : String, f : hrt.prefab.Prefab ) {
-		var content = f.saveData();
-		sys.io.File.saveContent(getPath(file), toJSON(content));
 	}
 
 	public function filterPrefabs( callb : hrt.prefab.Prefab -> Bool ) {
-		var exts = Lambda.array({iterator : @:privateAccess hrt.prefab.Library.registeredExtensions.keys });
+		var exts = Lambda.array({iterator : @:privateAccess hrt.prefab.Prefab.extensionRegistry.keys });
 		exts.push("prefab");
 		var todo = [];
 		browseFiles(function(path) {
@@ -1085,7 +823,7 @@ class Ide {
 			}
 			filterRec(prefab);
 			if( !changed ) return;
-			todo.push(function() sys.io.File.saveContent(getPath(path), toJSON(prefab.saveData())));
+			@:privateAccess todo.push(function() sys.io.File.saveContent(getPath(path), toJSON(prefab.serialize())));
 		});
 		for( t in todo )
 			t();
@@ -1130,11 +868,11 @@ class Ide {
 		window.title = title != null ? title : ((isCDB ? "CastleDB" : "HIDE") + " - " + projectDir);
 	}
 
-	public function runCommand(cmd, ?callb) {
+	public function runCommand(cmd, ?callb:String->Void) {
 		var c = cmd.split("%PROJECTDIR%").join(projectDir);
 		var slash = isWindows ? "\\" : "/";
 		c = c.split("/").join(slash);
-		js.node.ChildProcess.exec(c, callb);
+		js.node.ChildProcess.exec(c, function(e:js.node.ChildProcess.ChildProcessExecError,_,_) callb(e == null ? null : e.message));
 	}
 
 	public function initMenu() {
@@ -1389,7 +1127,49 @@ class Ide {
 			config.global.save();
 		});
 
+		// analysis
+		var analysis = menu.find(".analysis");
+		analysis.find(".memprof").click(function(_) {
+			#if (hashlink >= "1.15.0")
+			open("hide.view.Profiler",{});
+			#else
+			quickMessage("Profiler not available. Please update hashlink to version 1.15.0 or later.");
+			#end
+		});
+		analysis.find(".gpudump").click(function(_) {
+			var path = hide.tools.MemDump.gpudump();
+			quickMessage('Gpu mem dumped at ${path}.');
+		});
+
+		var settings = menu.find(".settings");
+		settings.find('.showSettings').click(function(_) {
+			open("hide.view.Settings", {});
+		});
+
 		window.menu = new hide.ui.Menu(menu).root;
+	}
+
+	public function showFileInResources(path: String) {
+		var filetree = getViews(hide.view.FileTree)[0];
+		if( filetree != null ) {
+			filetree.revealNode(path);
+		}
+	}
+
+	public static function showFileInExplorer(path : String) {
+		if(!haxe.io.Path.isAbsolute(path)) {
+			path = Ide.inst.getPath(path);
+		}
+
+		switch(Sys.systemName()) {
+			case "Windows": {
+				var cmd = "explorer.exe /select," + '"' + StringTools.replace(path, "/", "\\") + '"';
+				trace("OpenInExplorer: " + cmd);
+				Sys.command(cmd);
+			};
+			case "Mac":	Sys.command("open " + haxe.io.Path.directory(path));
+			default: throw "Exploration not implemented on this platform";
+		}
 	}
 
 	public function openFile( file : String, ?onCreate, ?onOpen) {
@@ -1497,6 +1277,44 @@ class Ide {
 			target.addChild(config, index);
 	}
 
+	public function globalMessage(element: Element, timeoutSeconds : Float = 5.0) {
+		var body = new Element('body');
+		var messages = body.find("#message-container");
+		if (messages.length == 0) {
+			messages = new Element('<div id="message-container"></div>');
+			body.append(messages);
+		}
+
+		messages.append(element);
+		// envie de prendre le raccourci vers le rez de chaussée la
+
+		haxe.Timer.delay(() -> {
+			element.addClass("show");
+		}, 10);
+
+		if (timeoutSeconds > 0.0) {
+			haxe.Timer.delay(() -> {
+				element.get(0).ontransitionend = function(_){
+					element.remove();
+				};
+				element.removeClass("show");
+
+			}, Std.int(timeoutSeconds * 1000.0));
+		}
+	}
+
+	public function quickMessage( text : String, timeoutSeconds : Float = 5.0 ) {
+		var e = new Element('
+		<div class="message">
+			<div class="icon ico ico-info-circle"></div>
+			<div class="text">${text}</div>
+		</div>');
+
+		js.Browser.console.log(text);
+
+		globalMessage(e, timeoutSeconds);
+	}
+
 	public function message( text : String ) {
 		js.Browser.window.alert(text);
 	}
@@ -1513,7 +1331,6 @@ class Ide {
 
 	static function main() {
 		h3d.impl.RenderContext.STRICT = false; // prevent errors with bad renderer
-		hide.tools.Macros.include(["hide.view","h3d.prim","h3d.scene","h3d.pass","hide.prefab","hrt"]);
 		new Ide();
 	}
 

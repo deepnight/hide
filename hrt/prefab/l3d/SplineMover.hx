@@ -3,7 +3,6 @@ import hrt.prefab.l3d.Spline;
 
 class SplineMoverObject extends h3d.scene.Object {
 	var prefab : SplineMover;
-	var ctx : Context;
 
 	var state : Spline.MoveAlongSplineState = new Spline.MoveAlongSplineState();
 	public var movables : Array<h3d.scene.Object> = [];
@@ -12,11 +11,12 @@ class SplineMoverObject extends h3d.scene.Object {
 	var debugViz : h3d.scene.Mesh = null;
 	#end
 
+	static var targetAbsPos = new h3d.Matrix();
+	static var tmpMat = new h3d.Matrix();
 
-	override public function new(?parent : h3d.scene.Object, prefab : SplineMover, ctx:Context) {
+	override public function new(?parent : h3d.scene.Object, prefab : SplineMover) {
 		super(parent);
 		this.prefab = prefab;
-		this.ctx = ctx;
 
 		#if editor
 		var prim = new h3d.prim.Sphere();
@@ -46,12 +46,16 @@ class SplineMoverObject extends h3d.scene.Object {
 		var pt = state.point;
 
 		for (c in movables) {
-			if (c.follow == null) {
-				// We attach the object to this parent because moveAlongSpline already includes the transform of
-				// this spline
-				c.follow = this.parent;
-			}
-			c.setPosition(pt.x, pt.y, pt.z);
+			c.getTransform(targetAbsPos);
+			targetAbsPos.identity();
+			targetAbsPos.setPosition(pt.toVector());
+
+			this.getAbsPos().getInverse(tmpMat);
+			tmpMat.multiply(targetAbsPos, tmpMat);
+			targetAbsPos.load(tmpMat);
+
+			c.setPosition(targetAbsPos.getPosition().x, targetAbsPos.getPosition().y, targetAbsPos.getPosition().z);
+			if( prefab.orientTangent ) c.setDirection(state.tangent);
 		}
 	}
 }
@@ -59,62 +63,34 @@ class SplineMoverObject extends h3d.scene.Object {
 class SplineMover extends Spline {
 
 	@:s public var speed = 1.0;
+	@:s public var orientTangent = false;
 	#if editor
 	@:s public var showDebug : Bool = true;
 	#end
-	override public function new(?parent) {
-		super(parent);
+
+	override function makeObject(parent:h3d.scene.Object) {
+		return new SplineMoverObject(parent, this);
 	}
 
-
-	override function createObject(ctx:Context) {
-		var obj = new SplineMoverObject(ctx.local3d, this, ctx);
-		return obj;
-	}
-
-	override public function make( ctx : Context ) : Context {
-		if( !enabled )
-			return ctx;
-		if( ctx == null ) {
-			ctx = new Context();
-			ctx.init();
+	override function makeChild(p:Prefab) {
+		super.makeChild(p);
+		var l3d = Object3D.getLocal3d(p);
+		if (l3d != null && p.to(SplinePoint) == null) {
+			(cast local3d:SplineMoverObject).movables.push(l3d);
 		}
-		var fromRef = #if editor ctx.shared.parent != null #else true #end;
-		if (fromRef && editorOnly #if editor || inGameOnly #end)
-			return ctx;
-		ctx = makeInstance(ctx);
-		for( c in children ){
-			var newCtx = null;
-			if( ctx.shared.customMake == null )
-				newCtx = c.make(ctx);
-			else if( c.enabled )
-				ctx.shared.customMake(ctx, c);
-
-			if (newCtx!= null && newCtx.local3d != null && Std.downcast(c, SplinePoint) == null) {
-				(cast ctx.local3d:SplineMoverObject).movables.push(newCtx.local3d);
-			}
-		}
-
-		// Pre-heat spline
-		(cast ctx.local3d:SplineMoverObject).updatePoint(1.0);
-
-		// Original Spline make
-		var curCtx = ctx.shared.getContexts(this)[0];
-		updateInstance(curCtx);
-		return curCtx;
 	}
 
-	override function updateInstance(ctx:Context, ?propName:String) {
-		super.updateInstance(ctx, propName);
-
+	override function postMakeInstance() {
+		super.postMakeInstance();
+		(cast local3d:SplineMoverObject).updatePoint(1.0);
 	}
 
 	#if editor
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "arrows-v", name : "Spline Mover", allowChildren: function(s) return true};
 	}
 
-	override function edit(ctx:EditContext) {
+	override function edit(ctx:hide.prefab.EditContext) {
 		ctx.properties.add( new hide.Element('
 			<p>Important ! Save then reload when you add a child prefab to animate in order to see the animation ! It\'s a known bug.</p>
 		'));
@@ -124,12 +100,13 @@ class SplineMover extends Spline {
 		<div class="group" name="Mover">
 			<dl>
 				<dt>Speed</dt><dd><input type="range" min="-100" max="100" field="speed"/></dd>
+				<dt>Orient To Tangent</dt><dd><input type="checkbox" field="orientTangent"/></dd>
 				<dt>Show Debug</dt><dd><input type="checkbox" field="showDebug"/></dd>
 			</dl>
 		</div>'), this, function(pname) { ctx.onChange(this, pname); });
 	}
 	#end
 
-	static var _ = hrt.prefab.Library.register("splineMover", SplineMover);
+	static var _ = hrt.prefab.Prefab.register("splineMover", SplineMover);
 
 }

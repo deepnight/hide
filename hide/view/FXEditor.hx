@@ -1,4 +1,5 @@
 package hide.view;
+import hide.view.FileTree;
 import hrt.prefab.Light;
 using Lambda;
 
@@ -23,8 +24,8 @@ typedef Section = {
 @:access(hide.view.FXEditor)
 class FXEditContext extends hide.prefab.EditContext {
 	var parent : FXEditor;
-	public function new(parent, context) {
-		super(context);
+	public function new(parent) {
+		super();
 		this.parent = parent;
 	}
 	override function onChange(p, propName) {
@@ -36,6 +37,9 @@ class FXEditContext extends hide.prefab.EditContext {
 @:access(hide.view.FXEditor)
 private class FXSceneEditor extends hide.comp.SceneEditor {
 	var parent : hide.view.FXEditor;
+	public var grid2d : h2d.Graphics;
+	public var is2D : Bool = false;
+
 
 	public function new(view,  data) {
 		super(view, data);
@@ -57,76 +61,53 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 		parent.onUpdate(dt);
 	}
 
-	override function duplicate(thenMove : Bool) {
-		if(curEdit == null) return;
-		var elements = curEdit.rootElements;
-		if(elements == null || elements.length == 0)
-			return;
-		if( isDuplicating )
-			return;
-		isDuplicating = true;
-		if( gizmo.moving ) {
-			@:privateAccess gizmo.finishMove();
-		}
-		var undoes = [];
-		var newElements = [];
-		for(elt in elements) {
-			var clone = elt.cloneData();
-			var index = elt.parent.children.indexOf(elt) + 1;
-			clone.parent = elt.parent;
-			elt.parent.children.remove(clone);
-			elt.parent.children.insert(index, clone);
-			autoName(clone);
-			makeInstance(clone);
-			newElements.push(clone);
+	override function updateStats() {
+		super.updateStats();
 
-			undoes.push(function(undo) {
-				if(undo) elt.parent.children.remove(clone);
-				else elt.parent.children.insert(index, clone);
-			});
-		}
-		refresh(Full, function() {
-			selectElements(newElements);
-			tree.setSelection(newElements);
-			if(thenMove && curEdit.rootObjects.length > 0) {
-				gizmo.startMove(MoveXY, true);
-				gizmo.onFinishMove = function() {
-					refreshProps();
-				}
+		if( statusText.visible ) {
+			var emitters = scene.s3d.findAll(o -> Std.downcast(o, hrt.prefab.fx.Emitter.EmitterObject));
+			var totalParts = 0;
+			for(e in emitters) {
+				totalParts += @:privateAccess e.numInstances;
 			}
-			isDuplicating = false;
-		});
-		refreshParents(elements);
 
-		undo.change(Custom(function(undo) {
-			selectElements([], NoHistory);
+			var emitterTime = 0.0;
+			for (e in emitters) {
+				emitterTime += e.tickTime;
+			}
 
-			var fullRefresh = false;
-			if(undo) {
-				for(elt in newElements) {
-					if(!removeInstance(elt)) {
-						fullRefresh = true;
-						break;
+			var trails = scene.s3d.findAll(o -> Std.downcast(o, hrt.prefab.l3d.Trails.TrailObj));
+			var trailTime = 0.0;
+
+
+			var poolSize = 0;
+			@:privateAccess
+			for (trail in trails) {
+				for (head in trail.trails) {
+					var p = head.firstPoint;
+					var len = 0;
+					while(p != null) {
+						len ++;
+						p = p.next;
 					}
 				}
+				trailTime += trail.lastUpdateDuration;
 			}
 
-			for(u in undoes) u(undo);
-
-			if(!undo) {
-				for(elt in newElements)
-					makeInstance(elt);
-			}
-
-			refresh(fullRefresh ? Full : Partial);
-		}));
+			var text : Array<String> = [
+				'Particles: $totalParts',
+				'Particles CPU time: ${FXEditor.floatToStringPrecision(emitterTime*1000.0, 2)} ms',
+				'Trails CPU time: ${FXEditor.floatToStringPrecision(trailTime * 1000.0, 2)} ms',
+			];
+			statusText.text += "\n" + text.join("\n");
+		}
 	}
 
 	override function createDroppedElement(path:String, parent:PrefabElement):hrt.prefab.Object3D {
-		var type = hrt.prefab.Library.getPrefabType(path);
+		var type = hrt.prefab.Prefab.getPrefabType(path);
 		if(type == "fx") {
 			var relative = ide.makeRelative(path);
-			var ref = new hrt.prefab.fx.SubFX(parent);
+			var ref = new hrt.prefab.fx.SubFX(parent, null);
 			ref.source = relative;
 			ref.name = new haxe.io.Path(relative).file;
 			return ref;
@@ -134,10 +115,38 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 		return super.createDroppedElement(path, parent);
 	}
 
-	override function setElementSelected( p : PrefabElement, ctx : hrt.prefab.Context, b : Bool ) {
-		if( p.getParent(hrt.prefab.fx.Emitter) != null )
+	override function updateGrid() {
+		super.updateGrid();
+
+		var showGrid = getOrInitConfig("sceneeditor.gridToggle", false);
+
+		if(grid2d != null) {
+			grid2d.remove();
+			grid2d = null;
+		}
+
+		if(!showGrid)
+			return;
+
+		if (is2D) {
+			grid2d = new h2d.Graphics(scene.s2d);
+			grid2d.scale(1);
+
+			grid2d.lineStyle(1.0, 12632256, 1.0);
+			grid2d.moveTo(0, -2000);
+			grid2d.lineTo(0, 2000);
+			grid2d.moveTo(-2000, 0);
+			grid2d.lineTo(2000, 0);
+			grid2d.lineStyle(0);
+
+			return;
+		}
+	}
+
+	override function setElementSelected( p : PrefabElement, b : Bool ) {
+		if( p.findParent(hrt.prefab.fx.Emitter) != null )
 			return false;
-		return super.setElementSelected(p, ctx, b);
+		return super.setElementSelected(p, b);
 	}
 
 	override function selectElements( elts, ?mode ) {
@@ -145,11 +154,52 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 		parent.onSelect(elts);
 	}
 
-	override function refresh(?mode, ?callb:Void->Void) {
-		// Always refresh scene
-		refreshScene();
-		refreshTree(callb);
-		parent.onRefreshScene();
+	override function applyTreeStyle(p: PrefabElement, el: Element, ?pname: String, ?tree: hide.comp.IconTree<PrefabElement>) {
+		super.applyTreeStyle(p, el, pname, tree);
+		if (el == null)
+			return;
+
+		var asCurve = Std.downcast(p, Curve);
+		if (asCurve != null) {
+			if (asCurve.blendMode == Blend || asCurve.blendMode == Reference) {
+				var paramName = asCurve.blendParam;
+				var color = 0xFFFFFF;
+				var missing = false;
+				var icon = "ico-random";
+				if (asCurve.blendMode == Blend) {
+					var fx = Std.downcast(this.parent.data, hrt.prefab.fx.FX);
+					if (fx == null) {
+						return;
+					}
+					var param = fx.parameters.find(function (p) {return p.name == paramName;});
+					missing = param == null;
+					color = param?.color;
+
+				}
+				else {
+					var ref = (cast this.parent.data: hrt.prefab.Prefab).locatePrefab(asCurve.blendParam);
+					if (ref == null) {
+						missing = true;
+					}
+					icon = "ico-link";
+				}
+
+				var colorCode = StringTools.hex(missing ? 0xFF0000 : color, 6);
+				var paramEl = el.find('>a>.fx-parameter');
+				if (paramEl.length == 0 ){
+					var v = new Element('<span class="fx-parameter"><i class="ico $icon"></i><span class="fx-param-name"></span></span>');
+					el.find("a").first().append(v);
+					paramEl = v;
+				}
+				var paramNameEl = paramEl.find(".fx-param-name");
+				paramNameEl.get(0).innerText = '$paramName';
+				paramEl.css("color", '#$colorCode');
+				paramEl.toggleClass("missing", missing);
+			}
+			else {
+				el.find(".fx-parameter").remove();
+			}
+		}
 	}
 
 	override function getNewContextMenu(current: PrefabElement, ?onMake: PrefabElement->Void=null, ?groupByType = true ) {
@@ -181,12 +231,6 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 				}
 				menu.push(item);
 			}
-			if(current != null) {
-				menu.push({
-					label: "Animation",
-					menu: parent.getNewTrackMenu(current)
-				});
-			}
 		} else {
 			for(name in ["Group", "Polygon", "Model", "Shader", "Emitter", "Trails"]) {
 				var item = allTypes.find(i -> i.label == name);
@@ -197,12 +241,6 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 					continue;
 				}
 				menu.push(item);
-			}
-			if(current != null) {
-				menu.push({
-					label: "Animation",
-					menu: parent.getNewTrackMenu(current)
-				});
 			}
 
 			menu.push({
@@ -224,8 +262,16 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 					}, "Unlit")
 				]
 			});
-			menu.sort(function(l1,l2) return Reflect.compare(l1.label,l2.label));
 		}
+
+		if(current != null) {
+			menu.push({
+				label: "Animation",
+				menu: parent.getNewTrackMenu(current)
+			});
+		}
+
+		menu.sort(function(l1,l2) return Reflect.compare(l1.label,l2.label));
 
 		var events = allTypes.filter(i -> StringTools.endsWith(i.label, "Event"));
 		if(events.length > 0) {
@@ -256,9 +302,13 @@ private class FXSceneEditor extends hide.comp.SceneEditor {
 	override function getAvailableTags(p:PrefabElement) {
 		return cast ide.currentConfig.get("fx.tags");
 	}
+
+	override function endRebuild() {
+		super.endRebuild();
+	}
 }
 
-class FXEditor extends FileView {
+class FXEditor extends hide.view.FileView {
 
 	var sceneEditor : FXSceneEditor;
 	var data : hrt.prefab.fx.BaseFX;
@@ -280,9 +330,6 @@ class FXEditor extends FileView {
 	var autoSync : Bool;
 	var currentVersion : Int = 0;
 	var lastSyncChange : Float = 0.;
-	var showGrid = true;
-	var grid : h3d.scene.Graphics;
-	var grid2d : h2d.Graphics;
 
 	var lastPan : h2d.col.Point;
 
@@ -302,13 +349,13 @@ class FXEditor extends FileView {
 	var statusText : h2d.Text;
 
 	var scriptEditor : hide.comp.ScriptEditor;
-	var fxScriptParser : hrt.prefab.fx.FXScriptParser;
+	//var fxScriptParser : hrt.prefab.fx.FXScriptParser;
 	var cullingPreview : h3d.scene.Sphere;
 
-	var viewModes : Array<String>;
+    var viewModes : Array<String>;
 
 	override function getDefaultContent() {
-		return haxe.io.Bytes.ofString(ide.toJSON(new hrt.prefab.fx.FX().saveData()));
+		@:privateAccess return haxe.io.Bytes.ofString(ide.toJSON(new hrt.prefab.fx.FX(null, null).serialize()));
 	}
 
 	override function canSave() {
@@ -318,7 +365,12 @@ class FXEditor extends FileView {
 	override function save() {
 		if( !canSave() )
 			return;
-		var content = ide.toJSON(data.saveData());
+
+		// Save render props
+		if (Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false) && sceneEditor.renderPropsRoot != null)
+			sceneEditor.renderPropsRoot.save();
+
+		@:privateAccess var content = ide.toJSON(cast(data, hrt.prefab.Prefab).serialize());
 		var newSign = ide.makeSignature(content);
 		if(newSign != currentSign)
 			haxe.Timer.delay(saveBackup.bind(content), 0);
@@ -333,17 +385,9 @@ class FXEditor extends FileView {
 		xOffset = -timelineLeftMargin / xScale;
 		var content = sys.io.File.getContent(getPath());
 		var json = haxe.Json.parse(content);
-		if (json.type == "fx") {
-			var inf = hrt.prefab.Library.getRegistered().get("fx");
-			data = Std.downcast(Type.createInstance(inf.cl, null), hrt.prefab.fx.FX);
-			if ( data == null )
-				throw "fx prefab override failed";
-		}
-		else {
-			is2D = true;
-			data = new hrt.prefab.fx.FX2D();
-		}
-		data.loadData(json);
+
+
+		data = cast(PrefabElement.createFromDynamic(json), hrt.prefab.fx.BaseFX);
 		currentSign = ide.makeSignature(content);
 
 		element.html('
@@ -371,6 +415,15 @@ class FXEditor extends FileView {
 								</div>
 							</div>
 							<div class="hide-scenetree"></div>
+							<div class="render-props-edition">
+								<div class="hide-toolbar">
+									<div class="toolbar-label">
+										<div class="icon ico ico-sun-o"></div>
+										Render props
+									</div>
+								</div>
+								<div class="hide-scenetree"></div>
+							</div>
 						</div>
 					</div>
 					<div class="tabs">
@@ -389,8 +442,15 @@ class FXEditor extends FileView {
 			</div>');
 		tools = new hide.comp.Toolbar(null,element.find(".tools-buttons"));
 		var tabs = new hide.comp.Tabs(null,element.find(".tabs"));
-		sceneEditor = new FXSceneEditor(this, data);
+		sceneEditor = new FXSceneEditor(this, cast(data, hrt.prefab.Prefab));
+
+		if (json.type == "fx2d") {
+			is2D = true;
+			sceneEditor.is2D = true;
+		}
+
 		element.find(".hide-scenetree").first().append(sceneEditor.tree.element);
+		element.find(".render-props-edition").find('.hide-scenetree').append(sceneEditor.renderPropsTree.element);
 		element.find(".hide-scroll").first().append(sceneEditor.properties.element);
 		element.find(".heaps-scene").first().append(sceneEditor.scene.element);
 
@@ -422,8 +482,8 @@ class FXEditor extends FileView {
 		var p : hide.comp.Popup = null;
 		helpButton.click(function(e) {
 			if (p == null) {
-				p = new hide.comp.SceneEditor.HelpPopup(null, helpButton, sceneEditor, tlKeys);
-				@:privateAccess p.popup.css({'position':'absolute', 'left':'30px','top':'800px'});
+				p = new hide.comp.SceneEditor.HelpPopup(helpButton, sceneEditor, tlKeys);
+				@:privateAccess p.element.css({'position':'absolute', 'left':'30px','top':'800px'});
 				//p = open(el);
 				p.onClose = function() {
 					p = null;
@@ -443,11 +503,11 @@ class FXEditor extends FileView {
 		});
 		var fxprops = new hide.comp.PropsEditor(undo,null,element.find(".fx-props"));
 		{
-			var edit = new FXEditContext(this, sceneEditor.context);
+			var edit = new FXEditContext(this);
 			edit.properties = fxprops;
 			edit.scene = sceneEditor.scene;
 			edit.cleanups = [];
-			data.edit(edit);
+			cast(data, hrt.prefab.Prefab).edit(edit);
 		}
 
 		if (is2D) {
@@ -463,18 +523,22 @@ class FXEditor extends FileView {
 			modified = false;
 		}
 		scriptEditor.onSave = onSaveScript;
-		fxScriptParser = new hrt.prefab.fx.FXScriptParser();
+		//fxScriptParser = new hrt.prefab.fx.FXScriptParser();
 		data.scriptCode = scriptEditor.code;
 
 		keys.register("playPause", function() { pauseButton.toggle(!pauseButton.isDown()); });
 
 		currentVersion = undo.currentID;
 		sceneEditor.tree.element.addClass("small");
+		sceneEditor.renderPropsTree.element.addClass("small");
 
 		selectMin = 0.0;
 		selectMax = 0.0;
 		previewMin = 0.0;
 		previewMax = data.duration == 0 ? 5000 : data.duration;
+
+		var rpEditionvisible = Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false);
+		setRenderPropsEditionVisibility(rpEditionvisible);
 	}
 
 	function refreshLayout() {
@@ -487,8 +551,9 @@ class FXEditor extends FileView {
 			refreshLayout();
 		if (tools != null)
 			tools.refreshToggles();
-	}
 
+		setRenderPropsEditionVisibility(Ide.inst.currentConfig.get("sceneeditor.renderprops.edit", false));
+	}
 	public function onSceneReady() {
 		light = sceneEditor.scene.s3d.find(function(o) return Std.downcast(o, h3d.scene.fwd.DirLight));
 		if( light == null ) {
@@ -504,14 +569,15 @@ class FXEditor extends FileView {
 		axis.lineStyle(1,0x0000FF); axis.moveTo(0,0,0); axis.lineTo(0,0,1);
 		axis.lineStyle();
 		axis.material.mainPass.setPassName("debuggeom");
-		axis.visible = (!is2D) ? showGrid : false;
+		axis.visible = !is2D;
 
 		cullingPreview = new h3d.scene.Sphere(0xffffff, data.cullingRadius, true, scene.s3d);
-		cullingPreview.visible = (!is2D) ? showGrid : false;
+		cullingPreview.material.mainPass.setPassName("debuggeom");
+		cullingPreview.visible = !is2D;
 
 		var toolsDefs = new Array<hide.comp.Toolbar.ToolDef>();
 		toolsDefs.push({id: "perspectiveCamera", title : "Perspective camera", icon : "video-camera", type : Button(() -> sceneEditor.resetCamera()) });
-		toolsDefs.push({id: "camSettings", title : "Camera Settings", icon : "camera", type : Popup((e : hide.Element) -> new hide.comp.CameraControllerEditor(sceneEditor, null,e)) });
+		toolsDefs.push({id: "camSettings", title : "Camera Settings", icon : "camera", type : Popup((e : hide.Element) -> new hide.comp.CameraControllerEditor(sceneEditor, e)) });
 
 		toolsDefs.push({id: "", title : "", icon : "", type : Separator});
 
@@ -521,14 +587,21 @@ class FXEditor extends FileView {
 
 		toolsDefs.push({id: "", title : "", icon : "", type : Separator});
 
+		toolsDefs.push({id: "toggleSnap", title : "Snap Toggle", icon: "magnet", type : Toggle((v) -> {sceneEditor.snapToggle = v; sceneEditor.updateGrid();})});
+		toolsDefs.push({id: "snap-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.SnapSettingsPopup(e, sceneEditor))});
+
+		toolsDefs.push({id: "", title : "", icon : "", type : Separator});
+
 		toolsDefs.push({id: "localTransformsToggle", title : "Local transforms", icon : "compass", type : Toggle((v) -> sceneEditor.localTransform = v)});
 
 		toolsDefs.push({id: "", title : "", icon : "", type : Separator});
 
-		toolsDefs.push({id: "gridToggle", title : "Toggle grid", icon : "th", type : Toggle((v) -> { showGrid = v; updateGrid(); }) });
-		toolsDefs.push({id: "axisToggle", title : "Toggle model axis", icon : "cube", type : Toggle((v) -> { sceneEditor.showBasis = v; sceneEditor.updateBasis(); }) });
-		toolsDefs.push({id: "iconVisibility", title : "Toggle 3d icons visibility", icon : "image", type : Toggle((v) -> { hide.Ide.inst.show3DIcons = v; }), defaultValue: true });
-		toolsDefs.push({id: "iconVisibility-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.IconVisibilityPopup(null, e, sceneEditor))});
+		toolsDefs.push({id: "showViewportOverlays", title : "Viewport Overlays", icon : "eye", type : Toggle((v) -> { sceneEditor.updateViewportOverlays(); }) });
+		toolsDefs.push({id: "viewportoverlays-menu", title : "", icon: "", type : Popup((e) -> new hide.comp.SceneEditor.ViewportOverlaysPopup(e, sceneEditor))});
+
+
+		toolsDefs.push({id: "", title : "", icon : "", type : Separator});
+
 
 		tools.saveDisplayKey = "FXScene/tools";
 
@@ -562,20 +635,14 @@ class FXEditor extends FileView {
 			autoSync = b;
 		});
 
-		tools.addToggle("wireframeToggle","connectdevelop", "Wireframe",(b) -> { sceneEditor.setWireframe(b); });
+		tools.addSeparator();
 
-		tools.addColor("Background color", function(v) {
-			scene.engine.backgroundColor = v;
-			updateGrid();
-		}, scene.engine.backgroundColor);
+		tools.addPopup(null, "View Modes", (e) -> new hide.comp.SceneEditor.ViewModePopup(e, Std.downcast(@:privateAccess scene.s3d.renderer, h3d.scene.pbr.Renderer), sceneEditor), null);
 
 		tools.addSeparator();
 
-		tools.addPopup(null, "View Modes", (e) -> new hide.comp.SceneEditor.ViewModePopup(null, e, Std.downcast(@:privateAccess scene.s3d.renderer, h3d.scene.pbr.Renderer), sceneEditor), null);
+		tools.addPopup(null, "Render Props", (e) -> new hide.comp.SceneEditor.RenderPropsPopup(e, this, sceneEditor, true), null);
 
-		tools.addSeparator();
-
-		tools.addPopup(null, "Render Props", (e) -> new hide.comp.SceneEditor.RenderPropsPopup(null, e, this, sceneEditor, true), null);
 
 		tools.addSeparator();
 
@@ -585,9 +652,11 @@ class FXEditor extends FileView {
 			scene.speed = v;
 		}, scene.speed);
 
+
+
 		var gizmo = @:privateAccess sceneEditor.gizmo;
 
-		var onSetGizmoMode = function(mode: hide.view.l3d.Gizmo.EditMode) {
+		var onSetGizmoMode = function(mode: hrt.tools.Gizmo.EditMode) {
 			tools.element.find("#translationMode").get(0).toggleAttribute("checked", mode == Translation);
 			tools.element.find("#rotationMode").get(0).toggleAttribute("checked", mode == Rotation);
 			tools.element.find("#scalingMode").get(0).toggleAttribute("checked", mode == Scaling);
@@ -600,12 +669,10 @@ class FXEditor extends FileView {
 
 		statusText = new h2d.Text(hxd.res.DefaultFont.get(), scene.s2d);
 		statusText.setPosition(5, 5);
-
-		updateGrid();
 	}
 
 	function onPrefabChange(p: PrefabElement, ?pname: String) {
-		if(p == data) {
+		if(p == cast(data, hrt.prefab.Prefab)) {
 			if (this.curveEditor != null) {
 				previewMax = data.duration == 0 ? 5000 : data.duration;
 				this.curveEditor.refreshTimeline(currentTime);
@@ -615,6 +682,16 @@ class FXEditor extends FileView {
 			previewMax = hxd.Math.min(data.duration == 0 ? 5000 : data.duration, previewMax);
 
 			cullingPreview.radius = data.cullingRadius;
+
+			if (pname == "parameters") {
+				var all = p.flatten();
+				for (e in all) {
+					var el = sceneEditor.tree.getElement(e);
+					if (el != null && el.toggleClass != null) {
+						sceneEditor.applyTreeStyle(e, el, pname);
+					}
+				}
+			}
 		}
 
 		if (pname == "blendMode") {
@@ -630,7 +707,7 @@ class FXEditor extends FileView {
 
 				while (toRemove.length > 0) {
 					var c = toRemove.pop();
-					c.removeInstance(sceneEditor.context);
+					//c.removeInstance();
 					c.parent.children.remove(c);
 				}
 			}
@@ -642,9 +719,16 @@ class FXEditor extends FileView {
 
 						// We're currently supporting blending with only 2 curves
 						for (i in 0...2) {
-							var c = new Curve();
+							var c = new Curve(null, null);
 							c.parent = curve;
-							c.name = '${curve.name}.${i}';
+							c.name = '$i';
+							if (i == 0) {
+								for (k in curve.keys) {
+									var newK = new hrt.prefab.Curve.CurveKey();
+									@:privateAccess newK.copyFromOther(k);
+									c.keys.push(newK);
+								}
+							}
 						}
 					}
 				}
@@ -653,31 +737,39 @@ class FXEditor extends FileView {
 				}
 			}
 
-			sceneEditor.refresh();
+			sceneEditor.queueRebuild(@:privateAccess sceneEditor.sceneData);
 			rebuildAnimPanel();
 		}
 
-		if(pname == "time" || pname == "loop" || pname == "animation" || pname == "blendMode" || pname == "blendFactor") {
+		if (pname == "blendParam") {
+			sceneEditor.queueRebuild(@:privateAccess sceneEditor.sceneData);
+			rebuildAnimPanel();
+		}
+
+		if (pname == "scale" || pname == "offset") {
+			rebuildAnimPanel();
+			data.refreshObjectAnims();
+		}
+
+		if(pname == "time" || pname == "loop" || pname == "animation" || pname == "blendMode") {
 			afterPan(false);
-			data.refreshObjectAnims(sceneEditor.getContext(data));
+			data.refreshObjectAnims();
 		}
 
 		if (pname == "loop") {
 			rebuildAnimPanel();
 		}
 
-		if (pname == "blendFactor") {
-			if (this.curveEditor != null)
+		if (pname == "parameters") {
+			if (this.curveEditor != null) {
+				var fx3d = Std.downcast(data, hrt.prefab.fx.FX);
+				if (fx3d != null) {
+					var params = fx3d.parameters;
+					this.curveEditor.evaluator.setAllParameters(params);
+				}
 				this.curveEditor.refreshGraph();
+			}
 		}
-
-	}
-
-	function onRefreshScene() {
-		var renderProps = data.find(e -> e.to(hrt.prefab.RenderProps));
-		if(renderProps != null)
-			renderProps.applyProps(scene.s3d.renderer);
-		updateGrid();
 	}
 
 	override function onDragDrop(items : Array<String>, isDrop : Bool) {
@@ -718,7 +810,6 @@ class FXEditor extends FileView {
 
 		var minHeight = 40;
 		var curveEditorHeight = 100;
-		var ctx = sceneEditor.getContext(data);
 
 		for (curve in curves){
 			var dispKey = getPath() + "/" + curve.getAbsPath(true);
@@ -736,17 +827,17 @@ class FXEditor extends FileView {
 				this.curveEditor.xScale = xScale;
 			}
 
-			if(["visibility", "s", "l", "a"].indexOf(curve.name.split(".").pop()) >= 0) {
+			if(["visibility", "s", "l", "a"].indexOf(curve.name.split(":").pop()) >= 0) {
 				curve.minValue = 0;
 				curve.maxValue = 1;
 			}
-			if(curve.name.indexOf("Rotation") >= 0) {
+			if(curve.name.indexOf("Rotation") >= 0 || curve.name.indexOf("Local Rotation") >= 0) {
 				curve.minValue = -360;
 				curve.maxValue = 360;
 			}
 			var shader = curve.parent.to(hrt.prefab.Shader);
 			if(shader != null) {
-				var sh = shader.getShaderDefinition(ctx);
+				var sh = shader.getShaderDefinition();
 				if(sh != null) {
 					var v = sh.data.vars.find(v -> v.kind == Param && v.name == curve.name);
 					if(v != null && v.qualifiers != null) {
@@ -763,7 +854,7 @@ class FXEditor extends FileView {
 			this.curveEditor.xOffset = xOffset;
 			this.curveEditor.xScale = xScale;
 			if(isInstanceCurve(curve) && curve.parent.to(hrt.prefab.fx.Emitter) == null || curve.name.indexOf("inst") >= 0)
-				curve.maxTime = 1.0;
+				curve.maxTime = curve.name.indexOf("OverTime") >= 0 ? 5000 : 1.0;
 				this.curveEditor.curves.push(curve);
 				this.curveEditor.onChange = function(anim) {
 					//refreshDopesheet();
@@ -784,6 +875,11 @@ class FXEditor extends FileView {
 			});
 		}
 
+		var fx3d = Std.downcast(data, hrt.prefab.fx.FX);
+		if (fx3d != null) {
+			var params = fx3d.parameters;
+			this.curveEditor.evaluator.setAllParameters(params);
+		}
 		this.curveEditor.refreshTimeline(previousTime);
 		this.curveEditor.refresh();
 	}
@@ -1000,10 +1096,10 @@ class FXEditor extends FileView {
 					var c = section.curves[i];
 
 					var curveColor = hide.comp.CurveEditor.CURVE_COLORS[i];
-					if (StringTools.contains(c.name, ".x") || StringTools.contains(c.name, ".h")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[0];
-					if (StringTools.contains(c.name, ".y") || StringTools.contains(c.name, ".s")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[1];
-					if (StringTools.contains(c.name, ".z") || StringTools.contains(c.name, ".l")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[2];
-					if (StringTools.contains(c.name, ".w") || StringTools.contains(c.name, ".a")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[3];
+					if (StringTools.contains(c.name, ":x") || StringTools.contains(c.name, ":h")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[0];
+					if (StringTools.contains(c.name, ":y") || StringTools.contains(c.name, ":s")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[1];
+					if (StringTools.contains(c.name, ":z") || StringTools.contains(c.name, ":l")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[2];
+					if (StringTools.contains(c.name, ":w") || StringTools.contains(c.name, ":a")) curveColor = hide.comp.CurveEditor.CURVE_COLORS[3];
 
 					// Assign same color to curve and curve's header
 					c.color = curveColor;
@@ -1247,10 +1343,10 @@ class FXEditor extends FileView {
 	function addTracks(element : PrefabElement, props : Array<PropTrackDef>, ?prefix: String) {
 		var added = [];
 		for(prop in props) {
-			var id = prefix != null ? prefix + "." + prop.name : prop.name;
+			var id = prefix != null ? prefix + ":" + prop.name : prop.name;
 			if(Curve.getCurve(element, id) != null)
 				continue;
-			var curve = new Curve(element);
+			var curve = new Curve(element,null);
 			curve.name = id;
 			if(prop.def != null)
 				curve.addKey(0, prop.def, Linear);
@@ -1267,11 +1363,11 @@ class FXEditor extends FileView {
 				else
 					element.children.push(c);
 			}
-			sceneEditor.refresh();
+			sceneEditor.queueRebuild(@:privateAccess sceneEditor.sceneData);
+			sceneEditor.queueRebuildCallback(() -> @:privateAccess sceneEditor.refreshTree(() -> sceneEditor.selectElements(!undo ? [for (a in added) a] : [], NoHistory)));
 		}));
-		sceneEditor.refresh(function() {
-			sceneEditor.selectElements([element]);
-		});
+		sceneEditor.queueRebuild(@:privateAccess sceneEditor.sceneData);
+		sceneEditor.queueRebuildCallback(() -> @:privateAccess sceneEditor.refreshTree(() -> sceneEditor.selectElements([for (a in added) a], NoHistory)));
 		return added;
 	}
 
@@ -1279,7 +1375,9 @@ class FXEditor extends FileView {
 		var obj3dElt = Std.downcast(elt, hrt.prefab.Object3D);
 		var obj2dElt = Std.downcast(elt, hrt.prefab.Object2D);
 		var shaderElt = Std.downcast(elt, hrt.prefab.Shader);
+		var rfxElt = Std.downcast(elt, hrt.prefab.rfx.RendererFX);
 		var emitterElt = Std.downcast(elt, hrt.prefab.fx.Emitter);
+
 		var particle2dElt = Std.downcast(elt, hrt.prefab.l2d.Particle2D);
 		var menuItems : Array<hide.comp.ContextMenu.ContextMenuItem> = [];
 		var lightElt = Std.downcast(elt, Light);
@@ -1291,7 +1389,7 @@ class FXEditor extends FileView {
 		function trackItem(name: String, props: Array<PropTrackDef>, ?prefix: String) : hide.comp.ContextMenu.ContextMenuItem {
 			var hasAllTracks = true;
 			for(p in props) {
-				if(getTrack(elt, prefix + "." + p.name) == null)
+				if(getTrack(elt, prefix + ":" + p.name) == null)
 					hasAllTracks = false;
 			}
 			return {
@@ -1346,8 +1444,16 @@ class FXEditor extends FileView {
 				menu: groupedTracks("position", xyzwTracks(3)),
 			});
 			menuItems.push({
+				label: "Local Position",
+				menu: groupedTracks("localPosition", xyzwTracks(3)),
+			});
+			menuItems.push({
 				label: "Rotation",
 				menu: groupedTracks("rotation", xyzwTracks(3)),
+			});
+			menuItems.push({
+				label: "Local Rotation",
+				menu: groupedTracks("localRotation", xyzwTracks(3)),
 			});
 			menuItems.push({
 				label: "Scale",
@@ -1364,7 +1470,7 @@ class FXEditor extends FileView {
 		}
 		if(shaderElt != null) {
 			var shader = shaderElt.makeShader();
-			var inEmitter = shaderElt.getParent(hrt.prefab.fx.Emitter) != null;
+			var inEmitter = shaderElt.findParent(hrt.prefab.fx.Emitter) != null;
 			var params = shader == null ? [] : @:privateAccess shader.shader.data.vars.filter(v -> v.kind == Param);
 			for(param in params) {
 				if (param.qualifiers?.contains(Ignore) ?? false)
@@ -1392,6 +1498,15 @@ class FXEditor extends FileView {
 					menuItems.push(item);
 			}
 		}
+		if (rfxElt != null) {
+			var serializedProps = rfxElt.getSerializableProps();
+			for (f in serializedProps) {
+				if (!(Reflect.field(rfxElt, f.name) is Float) || hasTrack(f.name))
+					continue;
+
+				menuItems.push(trackItem(f.name, [{name : f.name}]));
+			}
+		}
 		function addParam(param : hrt.prefab.fx.Emitter.ParamDef, prefix: String) {
 			var label = prefix + (param.disp != null ? param.disp : upperCase(param.name));
 			var item : hide.comp.ContextMenu.ContextMenuItem = switch(param.t) {
@@ -1417,6 +1532,7 @@ class FXEditor extends FileView {
 				addParam(param, "Instance ");
 			}
 		}
+
 		if (particle2dElt != null) {
 			for(param in hrt.prefab.l2d.Particle2D.emitter2dParams) {
 				if(!param.animate)
@@ -1424,6 +1540,7 @@ class FXEditor extends FileView {
 				addParam(param, "");
 			}
 		}
+
 		if( lightElt != null ) {
 			switch lightElt.kind {
 				case Point:
@@ -1478,54 +1595,6 @@ class FXEditor extends FileView {
 		return false;
 	}
 
-	function updateGrid() {
-		if(grid != null) {
-			grid.remove();
-			grid = null;
-		}
-		if(grid2d != null) {
-			grid2d.remove();
-			grid2d = null;
-		}
-
-		if(!showGrid)
-			return;
-
-		if (is2D) {
-			grid2d = new h2d.Graphics(scene.editor.context.local2d);
-			grid2d.scale(1);
-
-			grid2d.lineStyle(1.0, 12632256, 1.0);
-			grid2d.moveTo(0, -2000);
-			grid2d.lineTo(0, 2000);
-			grid2d.moveTo(-2000, 0);
-			grid2d.lineTo(2000, 0);
-			grid2d.lineStyle(0);
-
-			return;
-		}
-
-		grid = new h3d.scene.Graphics(scene.s3d);
-		grid.scale(1);
-		grid.material.mainPass.setPassName("debuggeom");
-
-		var col = h3d.Vector.fromColor(scene.engine.backgroundColor);
-		var hsl = col.toColorHSL();
-		if(hsl.z > 0.5) hsl.z -= 0.1;
-		else hsl.z += 0.1;
-		col.makeColor(hsl.x, hsl.y, hsl.z);
-
-		grid.lineStyle(1.0, col.toColor(), 1.0);
-		for(ix in -10...11) {
-			grid.moveTo(ix, -10, 0);
-			grid.lineTo(ix, 10, 0);
-			grid.moveTo(-10, ix, 0);
-			grid.lineTo(10, ix, 0);
-
-		}
-		grid.lineStyle(0);
-	}
-
 	function onUpdate(dt : Float) {
 		if (is2D)
 			onUpdate2D(dt);
@@ -1536,11 +1605,9 @@ class FXEditor extends FileView {
 	}
 
 	function onUpdate2D(dt:Float) {
-		var anim : hrt.prefab.fx.FX2D.FX2DAnimation = null;
-		var ctx = sceneEditor.getContext(data);
-		if(ctx != null && ctx.local2d != null) {
-			anim = Std.downcast(ctx.local2d, hrt.prefab.fx.FX2D.FX2DAnimation);
-		}
+
+		var anim = sceneEditor.root2d.find((p) -> Std.downcast(p, hrt.prefab.fx.FX2D.FX2DAnimation));
+
 		if(!pauseButton.isDown()) {
 			currentTime += scene.speed * dt;
 			if(this.curveEditor != null) {
@@ -1573,10 +1640,9 @@ class FXEditor extends FileView {
 			currentVersion = undo.currentID;
 		}
 
-		if (grid2d != null) {
-			@:privateAccess grid2d.setPosition(scene.s2d.children[0].x, scene.s2d.children[0].y);
+		if (sceneEditor.grid2d != null) {
+			@:privateAccess sceneEditor.grid2d.setPosition(scene.s2d.children[0].x, scene.s2d.children[0].y);
 		}
-
 
 	}
 
@@ -1635,11 +1701,11 @@ class FXEditor extends FileView {
 	}
 
 	function onUpdate3D(dt:Float) {
-		var ctx = sceneEditor.getContext(data);
-		if(ctx == null || ctx.local3d == null)
+		var local3d = sceneEditor.root3d;
+		if(local3d == null)
 			return;
 
-		var allFx = ctx.local3d.findAll(o -> Std.downcast(o, hrt.prefab.fx.FX.FXAnimation));
+		var allFx = local3d.findAll(o -> Std.downcast(o, hrt.prefab.fx.FX.FXAnimation));
 
 		if(!pauseButton.isDown()) {
 			currentTime += scene.speed * dt;
@@ -1650,8 +1716,6 @@ class FXEditor extends FileView {
 			if(currentTime >= previewMax) {
 				currentTime = previewMin;
 
-				//if(data.scriptCode != null && data.scriptCode.length > 0)
-					//sceneEditor.refreshScene(); // This allow to reset the scene when values are modified causes edition issues, solves
 				for(f in allFx)
 					f.setRandSeed(Std.random(0xFFFFFF));
 			}
@@ -1660,95 +1724,55 @@ class FXEditor extends FileView {
 		for(fx in allFx)
 			fx.setTime(currentTime - fx.startDelay);
 
-		var emitRateCurrent = 0.0;
-
-		var emitters = ctx.local3d.findAll(o -> Std.downcast(o, hrt.prefab.fx.Emitter.EmitterObject));
-		var totalParts = 0;
-		for(e in emitters) {
-			totalParts += @:privateAccess e.numInstances;
-			if (e.emitRateCurrent != null) {
-				emitRateCurrent = e.emitRateCurrent;
-			}
-		}
-
-		var emitterTime = 0.0;
-		for (e in emitters) {
-			emitterTime += e.tickTime;
-		}
-
-		var trails = ctx.local3d.findAll(o -> Std.downcast(o, hrt.prefab.l3d.Trails.TrailObj));
-		var trailCount = 0;
-		var trailTime = 0.0;
-		var trailTris = 0.0;
-		var trailMaxTris = 0;
-		var trailMaxLen = 0;
-		var trailCalcMaxLen = 0;
-		var trailRealIndicies = 0;
-		var trailAllocIndicies = 0;
-
-
-		var poolSize = 0;
+		// Fix anim events :
+		// we force play the first or last frame of the nearset
+		// anim event for each prefab that has anim events in the FX
+		// if we are not in the middle of playing an animation
 		@:privateAccess
-		for (trail in trails) {
-			for (head in trail.trails) {
-				trailCount ++;
-				var p = head.firstPoint;
-				var len = 0;
-				while(p != null) {
-					len ++;
-					p = p.next;
+		for (fx in allFx) {
+			var time = fx.localTime;
+			if (fx.objAnims == null)
+				continue;
+
+			for (anim in fx.objAnims) {
+				if (anim.events == null)
+					continue;
+
+				var minTime = hxd.Math.POSITIVE_INFINITY;
+				var nearest : hrt.prefab.fx.Event.EventInstance = null;
+				var jumpTo = 0.0;
+				for (instance in anim.events) {
+					var event = Std.downcast(instance.evt, hrt.prefab.fx.AnimEvent);
+					if (event == null)
+						continue;
+					var firstFrame = event.time;
+					var toFirstFrame = firstFrame - time;
+					if (toFirstFrame >= 0 && toFirstFrame < minTime) {
+						nearest = instance;
+						minTime = toFirstFrame;
+						jumpTo = 0.0001;
+					}
+
+					var anim = event.animation != null ? event.shared.loadAnimation(event.animation) : null;
+					var duration = event.duration > 0 ? event.duration : (anim?.getDuration() ?? 0.0);
+					var lastFrame = event.time + duration;
+					var toLastFrame = time - lastFrame;
+					if (toLastFrame >= 0 && toLastFrame < minTime) {
+						nearest = instance;
+						minTime = toLastFrame;
+						jumpTo = duration-0.0001;
+					}
+
+					// We are currently playing this animation, exit
+					if (toFirstFrame < 0 && toLastFrame < 0) {
+						nearest = null;
+						break;
+					}
 				}
-				if (len > trailMaxLen) {
-					trailMaxLen = len;
+				if (nearest != null) {
+					nearest.setTime(jumpTo);
 				}
 			}
-			trailTime += trail.lastUpdateDuration;
-			trailTris += trail.numVerts;
-
-			var p = trail.pool;
-			while(p != null) {
-				poolSize ++;
-				p = p.next;
-			}
-			trailMaxTris += Std.int(trail.vbuf.length/8.0);
-			trailCalcMaxLen = trail.calcMaxTrailPoints();
-			trailRealIndicies += trail.numVertsIndices;
-			trailAllocIndicies += trail.currentAllocatedIndexCount;
-		}
-
-		var smooth_factor = 0.10;
-		avg_smooth = avg_smooth * (1.0 - smooth_factor) + emitterTime * smooth_factor;
-		trailTime_smooth = trailTime_smooth * (1.0 - smooth_factor) + trailTime * smooth_factor;
-		num_trail_tri_smooth = num_trail_tri_smooth * (1.0-smooth_factor) + trailTris * smooth_factor;
-
-		if(statusText != null) {
-			var lines : Array<String> = [
-				'Time: ${Math.round(currentTime*1000)} ms',
-				'Scene objects: ${scene.s3d.getObjectsCount()}',
-				'Drawcalls: ${h3d.Engine.getCurrent().drawCalls}',
-				'Particles: $totalParts',
-				'Particles CPU time: ${floatToStringPrecision(avg_smooth * 1000, 3, true)} ms',
-			];
-
-			if (emitRateCurrent > 0.0) {
-				lines.push('Random emit rate : ${floatToStringPrecision(emitRateCurrent, 3, true)}');
-			}
-
-			if (trailCount > 0) {
-
-				lines.push('Trails CPU time : ${floatToStringPrecision(trailTime_smooth * 1000, 3, true)} ms');
-
-				/*lines.push("---");
-				lines.push('Num Trails : $trailCount');
-				lines.push('Trails Vertexes : ${floatToStringPrecision(num_trail_tri_smooth, 2, true)}');
-				lines.push('Allocated Trails Vertexes : $trailMaxTris');
-				lines.push('Max Trail Lenght : $trailMaxLen');
-				lines.push('Theorical Max Trail Lenght : $trailCalcMaxLen');
-				lines.push('Trail pool : $poolSize');
-				lines.push('Num Indices : $trailRealIndicies');
-				lines.push('Num Allocated Indices : $trailAllocIndicies');*/
-			}
-			statusText.text = lines.join("\n");
 		}
 
 		var cam = scene.s3d.camera;
@@ -1777,7 +1801,7 @@ class FXEditor extends FileView {
 	}
 
 	static function isInstanceCurve(curve: Curve) {
-		return curve.getParent(hrt.prefab.fx.Emitter) != null;
+		return curve.findParent(hrt.prefab.fx.Emitter) != null;
 	}
 
 	static var _ = FileTree.registerExtension(FXEditor, ["fx"], { icon : "sitemap", createNew : "FX" });
@@ -1789,6 +1813,17 @@ class FXEditor extends FileView {
 		return this.currentTime = value;
 	}
 
+	public function setRenderPropsEditionVisibility(visible : Bool) {
+		var renderPropsEditionEl = this.element.find('.render-props-edition');
+
+		if (!visible) {
+			renderPropsEditionEl.css({ display : 'none' });
+			return;
+		}
+
+		renderPropsEditionEl.css({ display : 'block' });
+	}
+
 	function get_currentTime():Float {
 		return @:privateAccess this.curveEditor.currentTime;
 	}
@@ -1798,7 +1833,7 @@ class FXEditor extends FileView {
 class FX2DEditor extends FXEditor {
 
 	override function getDefaultContent() {
-		return haxe.io.Bytes.ofString(ide.toJSON(new hrt.prefab.fx.FX2D().saveData()));
+		@:privateAccess return haxe.io.Bytes.ofString(ide.toJSON(new hrt.prefab.fx.FX2D(null, null).save()));
 	}
 
 	static var _2d = FileTree.registerExtension(FX2DEditor, ["fx2d"], { icon : "sitemap", createNew : "FX 2D" });

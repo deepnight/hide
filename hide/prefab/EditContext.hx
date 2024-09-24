@@ -1,36 +1,32 @@
 package hide.prefab;
+
 import hrt.prefab.Prefab;
-import hrt.prefab.Context;
 
 class EditContext {
 
-	public var rootContext : Context;
-
 	#if editor
 
+	/**
+		list of functions to call in the sceneEditor `update()`
+	**/
 	var updates : Array<Float->Void> = [];
 
 	public var ide(get,never) : hide.Ide;
 	public var scene : hide.comp.Scene;
 	public var properties : hide.comp.PropsEditor;
 	public var cleanups : Array<Void->Void>;
+	public var rootPrefab : hrt.prefab.Prefab;
 	function get_ide() return hide.Ide.inst;
 
 	public function onChange(p : Prefab, propName : String) {
-		var ctx = getContext(p);
-		scene.setCurrent();
-		if(ctx != null) {
-			p.updateInstance(ctx, propName);
-			var parent = p.parent;
-			while( parent != null ) {
-				var pr = parent.getHideProps();
-				if( pr.onChildUpdate != null ) pr.onChildUpdate(p);
-				parent = parent.parent;
-			}
+		p.updateInstance(propName);
+
+		var parent = p.parent;
+		while( parent != null ) {
+			var pr = parent.getHideProps();
+			if( pr.onChildUpdate != null ) pr.onChildUpdate(p);
+			parent = parent.parent;
 		}
-		for( ctx2 in rootContext.shared.getContexts(p) )
-			if( ctx2 != ctx )
-				p.updateInstance(ctx2, propName);
 	}
 
 	public function getCurrentProps( p : Prefab ) : Element {
@@ -51,7 +47,8 @@ class EditContext {
 	}
 
 	public function makeChanges( p : Prefab, f : Void -> Void ) @:privateAccess {
-		var current = haxe.Json.parse(haxe.Json.stringify(p.save()));
+		var current = p.save();
+
 		properties.undo.change(Custom(function(b) {
 			var old = p.save();
 			p.load(current);
@@ -66,13 +63,12 @@ class EditContext {
 
 	#end
 
-	public function new(ctx) {
-		this.rootContext = ctx;
+	public function new() {
 	}
 
-	public function getContext( p : Prefab ) {
+	/*public function getContext( p : Prefab ) {
 		return rootContext.shared.contexts.get(p);
-	}
+	}*/
 
 	/**
 		Converts screen mouse coordinates into projection into ground.
@@ -129,7 +125,7 @@ class EditContext {
 			path.pop();
 		}
 
-		for( o in rootContext.shared.root3d )
+		for( o in rootPrefab.shared.root3d)
 			getRec([], o);
 
 		return out;

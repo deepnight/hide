@@ -1,5 +1,10 @@
 package hide.comp;
 import hide.view.CameraController;
+import hide.comp.Popup;
+import hide.comp.Range;
+import hide.comp.ExpRange;
+
+
 
 class CameraControllerEditor extends Popup {
 
@@ -14,11 +19,11 @@ class CameraControllerEditor extends Popup {
         {name: "Fly/6DOF", cl: FlightController},
     ];
 
-    public function new(editor: SceneEditor, ?parent : Element, ?root : Element) {
-        super(parent, root);
+    public function new(editor: SceneEditor, ?parent : Element) {
+        super(parent);
         this.editor = editor;
-        popup.addClass("settings-popup");
-        popup.append(new Element("<p>").text("Camera settings"));
+        element.addClass("settings-popup");
+        element.append(new Element("<p>").text("Camera settings"));
         /*popup.width("400px");*/
 
         create();
@@ -47,7 +52,7 @@ class CameraControllerEditor extends Popup {
 
     function create() {
         if (form_div == null)
-            form_div = new Element("<div>").addClass("form-grid").appendTo(popup);
+            form_div = new Element("<div>").addClass("form-grid").appendTo(element);
         form_div.empty();
 
         {
@@ -66,6 +71,15 @@ class CameraControllerEditor extends Popup {
             range.value = editor.cameraController.wantedFOV;
             range.onChange = function(_) {
                 editor.cameraController.wantedFOV = range.value;
+            };
+        }
+
+        if (Std.isOfType(editor.cameraController, CamController)) {
+            var dd = new Element("<label for='zoom'>").text("Min Zoom Distance").appendTo(form_div);
+            var range = new Range(form_div, new Element("<input id='zoom' type='range' min='0' max='10'>"));
+            range.value = editor.cameraController.minDistance;
+            range.onChange = function(_) {
+                editor.cameraController.minDistance = range.value;
             };
         }
 
@@ -91,11 +105,20 @@ class CameraControllerEditor extends Popup {
                 var newClass = controllersClasses[id];
                 if (Type.getClass(editor.cameraController) != newClass.cl) {
                     editor.switchCamController(newClass.cl);
+                    editor.saveCam3D();
+                    create();
                     refresh();
                 }
-                refresh();
             });
         }
+
+		{
+            var dd = new Element("<label for='snapToGround'>").text("Snap To Ground").appendTo(form_div);
+            var cb = new Element("<input id='snapToGround' type='checkbox'>").prop("checked", editor.cameraController.snapToGround).appendTo(form_div);
+			cb.on("change", function(_) {
+				editor.cameraController.snapToGround = cb.prop("checked");
+			});
+		}
 
         {
             var dd = new Element("<label for='cam-speed'>").text("Fly Speed").appendTo(form_div);

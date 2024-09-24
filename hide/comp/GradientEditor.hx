@@ -53,7 +53,7 @@ class GradientBox extends Component {
 
         element.click(function(e) {
             if (gradientEditor == null) {
-                gradientEditor = new GradientEditor(null, element);
+                gradientEditor = new GradientEditor(element);
                 gradientEditor.value = value;
                 gradientEditor.onChange = function(isDragging : Bool) {
                     value = gradientEditor.value;
@@ -63,8 +63,8 @@ class GradientBox extends Component {
                     gradientEditor = null;
                 }
             } else {
-                gradientEditor.close();
-                gradientEditor = null;
+                //gradientEditor.close();
+                //gradientEditor = null;
             }
         });
 
@@ -110,6 +110,7 @@ class GradientEditor extends Popup {
     var stopMarquers : Array<Element>;
 
     var selectedStop : Element;
+    var selectNextRepaint : Int = -1;
     var stopEditor : Element;
     var stopLabel : Element;
 
@@ -122,7 +123,7 @@ class GradientEditor extends Popup {
     var keys : hide.ui.Keys;
 
     public dynamic function onChange(isDragging : Bool) {
-
+        set_value(innerValue);
     }
 
     function set_value(value: GradientData) {
@@ -136,17 +137,17 @@ class GradientEditor extends Popup {
         return innerValue;
     }
 
-    public function new(?parent : Element, ?root : Element) {
-        super(parent, root);
+    public function new(?parent : Element, editGradientSettings: Bool = true) {
+        super(parent);
 
-        popup.addClass("gradient-editor");
+        element.addClass("gradient-editor");
 
         // Allows the popup to become focusable,
         // allowing the handling of keyboard events
-        popup.attr("tabindex","-1");
-        popup.focus();
+        element.attr("tabindex","-1");
+        element.focus();
 
-		popup.on("keydown", function (e : KeyboardEvent) {
+		element.on("keydown", function (e : KeyboardEvent) {
             if (e.key == "Delete" || e.key =="Backspace") {
                 if (selectedStop != null) {
                     removeStop(selectedStop);
@@ -166,7 +167,7 @@ class GradientEditor extends Popup {
             }
         });
 
-        gradientView = new GradientView(popup);
+        gradientView = new GradientView(element);
         gradientView.element.height(90).width(256);
 
         var elem = gradientView.element.get(0);
@@ -202,7 +203,7 @@ class GradientEditor extends Popup {
         </filter>
         </defs>');
 
-        var editor = new Element("<div>").addClass("editor").appendTo(popup);
+        var editor = new Element("<div>").addClass("editor").appendTo(element);
         stopEditor = new Element("<div>").addClass("stop-editor").appendTo(editor);
 
         stopLabel = new Element("<p>").appendTo(stopEditor);
@@ -302,6 +303,10 @@ class GradientEditor extends Popup {
         .append(new Element("<label for='colorMode'>").text("Color Space").attr("title", "Change the color space to use when interpolating the stops of the gradient."))
         .append(colorMode);
 
+        if (!editGradientSettings) {
+            detailsSection.hide();
+        }
+
         reflow();
         fixInputSelect();
     }
@@ -317,7 +322,7 @@ class GradientEditor extends Popup {
         return !colorbox.isPickerOpen();
     }
 
-    public function selectStop(stop:Element) {
+    public function selectStop(stop:Element, repaint: Bool = true) {
         if (selectedStop != null) {
             selectedStop.removeClass("selected");
         }
@@ -325,7 +330,9 @@ class GradientEditor extends Popup {
         if (selectedStop != null) {
             selectedStop.addClass("selected");
         }
-        repaint();
+        if (repaint) {
+           this.repaint();
+        }
     }
 
     public function repaint() {
@@ -380,6 +387,14 @@ class GradientEditor extends Popup {
             }
         }
 
+        if (selectNextRepaint != -1) {
+            var elem = stopMarquers[selectNextRepaint];
+            if (elem != null) {
+                selectStop(elem, false);
+            }
+            selectNextRepaint = -1;
+        }
+
         var vector = new h3d.Vector4();
         for (i in 0...stopMarquers.length) {
             var marquer = stopMarquers[i];
@@ -388,18 +403,18 @@ class GradientEditor extends Popup {
             var x : Float = stop.position;
             var y : Float = 0.5;
             marquer.attr("transform", 'translate(${x}, ${y})');
-
-            Gradient.evalData(innerValue, stop.position, vector);
+			vector.setColor(stop.color);
             marquer.children(".fill").attr({fill: 'rgba(${vector.r*255.0}, ${vector.g*255.0}, ${vector.b*255.0}, ${vector.a})'});
         }
 
-        if (selectedStop != null) {
-            var id = stopMarquers.indexOf(selectedStop);
-            colorbox.value = innerValue.stops[id].color;
+        var selectedStopId = stopMarquers.indexOf(selectedStop);
+        if (selectedStopId != -1) {
+            colorbox.value = innerValue.stops[selectedStopId].color;
             stopEditor.removeClass("disabled");
-            stopLabel.text('Stop ${id+1} / ${stopMarquers.length}');
+            stopLabel.text('Stop ${selectedStopId+1} / ${stopMarquers.length}');
             colorbox.isPickerEnabled = true;
         } else {
+            selectStop(null, false);
             stopEditor.addClass("disabled");
             stopLabel.text('Stop');
             colorbox.value = 0x77777777;
@@ -426,10 +441,13 @@ class GradientEditor extends Popup {
 
     function addStop(pos : Float) {
         var color = Gradient.evalData(innerValue, pos);
-        innerValue.stops.push({position: pos, color:color.toColor()});
+        var newStop = {position: pos, color:color.toColor()};
+        innerValue.stops.push(newStop);
         innerValue.stops.sort((a, b) -> return if (a.position < b.position) -1
                                 else if (a.position > b.position) 1
                                 else 0);
+        var id = innerValue.stops.indexOf(newStop);
+        selectNextRepaint = id;
         onChange(false);
     }
 
@@ -483,7 +501,7 @@ class GradientView extends Component {
 
         for (x in 0...innerValue.resolution) {
             var index = x * 4;
-            Gradient.evalData(innerValue, x / innerValue.resolution, color);
+            Gradient.evalData(innerValue, x / (innerValue.resolution-1), color);
             image_data.data[index] = Std.int(color.r * 255.0);
             image_data.data[index+1] = Std.int(color.g * 255.0);
             image_data.data[index+2] = Std.int(color.b * 255.0);

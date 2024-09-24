@@ -156,9 +156,13 @@ class Formulas {
 		for( s in editor.base.sheets )
 			sheetNames.set(getTypeName(s), s);
 
+		var changed = false;
 		var refs : Array<SheetAccess> = [];
 		function replaceRec( e : hscript.Expr ) {
 			switch( e.e ) {
+			case EField({ e : EIdent(s) }, name) if ( s == "Sheets" ):
+				e.e = EIdent(name);
+				changed = true;
 			case EField({ e : EIdent(s) }, name) if( sheetNames.exists(s) ):
 				if( name == "all" || name == "resolve" ) {
 					var found = false;
@@ -173,7 +177,12 @@ class Formulas {
 				hscript.Tools.iter(e, replaceRec);
 			}
 		}
+
 		replaceRec(expr);
+		while(changed) {
+			changed = false;
+			replaceRec(expr);
+		}
 
 		formulas = [];
 		fmap = new Map();
@@ -280,6 +289,7 @@ class Formulas {
 		return t;
 	}
 
+	#if !hl
 	public function createNew( c : Cell, ?onCreated : Formula -> Void ) {
 		var name = ide.ask("Formula name");
 		if( name == null ) return;
@@ -302,9 +312,11 @@ class Formulas {
 			}
 		});
 	}
+	#end
 
 }
 
+#if !hl
 class FormulasView extends hide.view.Script {
 
 	override function getScriptChecker() {
@@ -353,6 +365,7 @@ class FormulasView extends hide.view.Script {
 		var carray = switch( _tarray ) { case TInst(c,_): c; default: throw "assert"; }
 		function tarray(t) return TInst(carray,[t]);
 
+		var sfields : Array<{name : String, t : TType, opt : Bool}> = [];
 		var cdefs = new Map();
 		for( s in ide.database.sheets ) {
 			var cdef : CClass = {
@@ -374,9 +387,12 @@ class FormulasView extends hide.view.Script {
 					opt : false,
 				}
 			];
+
+			sfields.push({name: cdef.name, t : TAnon(afields), opt : false});
 			check.checker.setGlobal(cdef.name, TAnon(afields));
 		}
 
+		check.checker.setGlobal("Sheets", TAnon(sfields));
 		var tenum = TInst(check.checker.types.defineClass("EnumValue"),[]);
 		for( s in ide.database.sheets ) {
 			var cdef = cdefs.get(s.name);
@@ -394,7 +410,7 @@ class FormulasView extends hide.view.Script {
 				case TBool: TBool;
 				case TDynamic: TDynamic;
 				case TRef(other): TInst(cdefs.get(other),[]);
-				case TCustom(_), TImage, TLayer(_), TTileLayer, TTilePos: null;
+				case TCustom(_), TImage, TLayer(_), TTileLayer, TTilePos, TGradient, TCurve: null;
 				case TList, TProperties:
 					var t = TInst(cdefs.get(s.name+"@"+c.name),[]);
 					c.type == TList ? @:privateAccess check.checker.types.getType("Array",[t]) : t;
@@ -411,3 +427,4 @@ class FormulasView extends hide.view.Script {
 
 	static var _ = hide.ui.View.register(FormulasView);
 }
+#end

@@ -23,6 +23,7 @@ private typedef TypedProperty = {
 
 private typedef TypedComponent = {
 	var name : String;
+	var ?classDef : hscript.Checker.CClass;
 	var ?parent : TypedComponent;
 	var properties : Map<String, TypedProperty>;
 	var vars : Map<String, Type>;
@@ -40,7 +41,7 @@ private class DomkitCssParser extends domkit.CssParser {
 	}
 
 	override function resolveComponent(i:String, p:Int) {
-		var c = @:privateAccess dom.components.get(i);
+		var c = @:privateAccess dom.resolveComp(i);
 		return c?.domkitComp;
 	}
 
@@ -51,16 +52,18 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 
 	var t_string : Type;
 	var parsers : Array<domkit.CssValue.ValueParser>;
+	var lastVariables : Map<String, domkit.CssValue> = new Map();
+	public var params : Map<String, Type> = new Map();
 	public var components : Map<String, TypedComponent>;
 	public var properties : Map<String, Array<TypedProperty>>;
-	public var definedIdents : Map<String, Array<TypedComponent>>;
+	public var definedIdents : Map<String, Array<TypedComponent>> = [];
 
 	public function new(config) {
 		super(config,"domkit");
 		t_string = checker.types.resolve("String");
 
 		parsers = [new h2d.domkit.BaseComponents.CustomParser()];
-		var dcfg : Array<String> = config.get("domkit-parsers");
+		var dcfg : Array<String> = config.get("domkit.parsers");
 		if( dcfg != null ) {
 			for( name in dcfg ) {
 				var cl = std.Type.resolveClass(name);
@@ -68,19 +71,32 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 					ide.error("Couldn't find custom domkit parser "+name);
 					continue;
 				}
-				dcfg.push(std.Type.createInstance(cl,[]));
+				parsers.push(std.Type.createInstance(cl,[]));
 			}
 		}
 		initComponents();
 	}
 
 	public function checkDML( dmlCode : String, filePath : String, position = 0 ) {
-		// reset locals
+		init();
+		// reset locals and other vars
 		checker.check({ e : EBlock([]), pmin : 0, pmax : 0, origin : "", line : 0 });
+		@:privateAccess checker.locals = params.copy();
 		definedIdents = new Map();
 		var parser = new domkit.MarkupParser();
 		parser.allowRawText = true;
 		var expr = parser.parse(dmlCode,filePath, position);
+		switch( expr.kind ) {
+		case Node(null) if( expr.children.length == 1 ): expr = expr.children[0];
+		default:
+		}
+		switch( expr.kind ) {
+		case Node(name) if( name != null ):
+			var comp = resolveComp(name.split(":")[0]);
+			if( comp != null && comp.classDef != null )
+				checker.setGlobal("this",TInst(comp.classDef,[]));
+		default:
+		}
 		try {
 			checkDMLRec(expr, true);
 		} catch( e : hscript.Expr.Error ) {
@@ -96,14 +112,14 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 		for( file in includes ) {
 			var content = sys.io.File.getContent(ide.getPath(file));
 			try {
-				parser.parseSheet(content);
+				parser.parseSheet(content, file);
 			}  catch( e : domkit.Error ) {
 				var line = content.substr(0, e.pmin).split("\n").length;
 				ide.quickError(file+":"+line+": "+e.message);
 			}
 		}
-
-		var rules = parser.parseSheet(cssCode);
+		lastVariables = parser.variables;
+		var rules = parser.parseSheet(cssCode, null);
 		var w = parser.warnings[0];
 		if( w != null )
 			throw new domkit.Error(w.msg, w.pmin, w.pmax);
@@ -210,6 +226,7 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 			if( name == null )
 				continue;
 			var comp = makeComponent(name);
+			comp.classDef = c;
 			cmap.set(c.name, comp);
 			if( StringTools.startsWith(c.name,"h2d.domkit.") )
 				cmap.set("h2d."+c.name.substr(11,c.name.length-11-4), comp);
@@ -247,6 +264,7 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 					if( pl == null ) {
 						pl = [];
 						properties.set(name, pl);
+						domkit.Property.get(name); // force create, prevent warning if used in css
 					}
 					var dup = false;
 					for( p2 in pl )
@@ -287,7 +305,65 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 	}
 
 	function resolveComp( name : String ) : TypedComponent {
-		return components.get(name);
+		var c = components.get(name);
+		if( c != null )
+			return c;
+		// dynamic load from comps directories
+		var dirs : Array<String> = config.get("domkit.components");
+		if( dirs == null ) dirs = ["ui/comp"];
+		for( d in dirs ) {
+			var path = d+"/"+name+".domkit";
+			var content = try sys.io.File.getContent(ide.getPath(path)) catch( e : Dynamic ) continue;
+			var data = hrt.impl.DomkitViewer.parse(content);
+			var node = null, params = new Map();
+
+			var parser = new domkit.MarkupParser();
+			parser.allowRawText = true;
+			var expr = try parser.parse(data.dml,path,content.indexOf(data.dml)) catch( e : domkit.Error ) continue;
+
+			switch( expr.kind ) {
+			case Node(null):
+				for( c in expr.children )
+					switch( c.kind ) {
+					case Node(n) if( n.split(":")[0] == name ): node = c;
+					default:
+					}
+			default:
+				throw "assert";
+			}
+
+			if( node == null )
+				continue;
+
+			if( node.arguments != null ) {
+				var args = [for( a in node.arguments ) switch( a.value ) { case Code(ident): ident; default: null; }];
+				for( a in args )
+					if( a != null )
+						params.set(a, TLazy(() -> throw new hscript.Expr.Error(ECustom("Missing param type "+a),0,0,"",0)));
+				try {
+					var t = typeCode(data.params, content.indexOf(data.params));
+					switch( t ) {
+					case TAnon(fields):
+						var fm = [for( f in fields ) f.name => f.t];
+						for( a in args )
+							if( a != null ) {
+								var t = fm.get(a);
+								if( t != null )
+									params.set(a, t);
+							}
+					default:
+					}
+				} catch( e : hscript.Expr.Error ) {
+				}
+			}
+
+			try {
+				return defineComponent(name, node, params);
+			} catch( e : domkit.Error ) {
+				continue;
+			}
+		}
+		return null;
 	}
 
 	function parseCode( code : String, pos : Int ) {
@@ -394,38 +470,74 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 			comps.push(c);
 	}
 
+	function domkitError(msg,pmin,pmax=-1) {
+		throw new domkit.Error(msg, pmin, pmax);
+	}
+
+	static var IDENT = ~/^([A-Za-z_][A-Za-z0-9_]*)$/;
+
+	function defineComponent( name : String, e : domkit.MarkupParser.Markup, params : Map<String,Type> ) {
+		var parts = name.split(":");
+		var parent = null;
+		var c = components.get(name);
+		if( parts.length == 2 ) {
+			name = parts[0];
+			c = components.get(name);
+			parent = resolveComp(parts[1]);
+			if( parent == null ) {
+				var start = e.pmin + name.length + 1;
+				domkitError("Unknown parent component "+parts[1], start, start + parts[1].length);
+			}
+		}
+		if( parent == null )
+			parent = components.get("flow");
+		if( c == null )
+			c = makeComponent(name);
+		c.parent = parent;
+		if( e.arguments == null )
+			c.arguments = parent == null ? [] : parent.arguments;
+		else {
+			c.arguments = [];
+			for( a in e.arguments ) {
+				var name = switch( a.value ) {
+				case Code(c) if( IDENT.match(c) ): c;
+				default:
+					domkitError("Invalid parameter", a.pmin, a.pmax);
+					continue;
+				}
+				var t = params.get(name);
+				if( t == null )
+					domkitError("Unknown parameter type", a.pmin, a.pmax);
+				c.arguments.push({
+					name : name,
+					t : t,
+				});
+			}
+		}
+		if( e.condition != null )
+			domkitError("Invalid condition", e.condition.pmin, e.condition.pmax);
+		if( e.attributes.length > 0 )
+			domkitError("Invalid attribute", e.attributes[0].pmin, e.attributes[0].pmax);
+		return c;
+	}
+
 	function checkDMLRec( e : domkit.MarkupParser.Markup, isRoot=false ) {
 		switch( e.kind ) {
 		case Node(null):
 			for( c in e.children )
 				checkDMLRec(c,isRoot);
+		case Node(name) if( isRoot ):
+			defineComponent(name, e, params);
+			for( c in e.children )
+				checkDMLRec(c);
 		case Node(name):
 			var c = resolveComp(name);
-			if( isRoot ) {
-				var parts = name.split(":");
-				var parent = null;
-				if( parts.length == 2 ) {
-					name = parts[0];
-					c = resolveComp(name);
-					parent = resolveComp(parts[1]);
-					if( parent == null ) {
-						var start = e.pmin + name.length + 1;
-						throw new domkit.Error("Unknown parent component "+parts[1], start, start + parts[1].length);
-					}
-				}
-				if( c == null )
-					c = makeComponent(name);
-				c.parent = parent;
-				c.arguments = parent == null ? [] : c.arguments;
-			}
-			if( c == null && isRoot )
-				c = resolveComp("flow");
 			if( c == null )
-				throw new domkit.Error("Unknown component "+name, e.pmin, e.pmin + name.length);
+				domkitError("Unknown component "+name, e.pmin, e.pmin + name.length);
 			for( i => a in e.arguments ) {
 				var arg = c.arguments[i];
 				if( arg == null )
-					throw new domkit.Error("Too many arguments (require "+[for( a in c.arguments ) a.name].join(",")+")",a.pmin,a.pmax);
+					domkitError("Too many arguments (require "+[for( a in c.arguments ) a.name].join(",")+")",a.pmin,a.pmax);
 				var t = switch( a.value ) {
 				case RawValue(_): t_string;
 				case Code(code): typeCode(code, a.pmin);
@@ -434,7 +546,7 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 			}
 			for( i in e.arguments.length...c.arguments.length )
 				if( !c.arguments[i].opt )
-					throw new domkit.Error("Missing required argument "+c.arguments[i].name,e.pmin,e.pmax);
+					domkitError("Missing required argument "+c.arguments[i].name,e.pmin,e.pmax);
 			for( a in e.attributes ) {
 				var pname = haxeToCss(a.name);
 				switch( pname ) {
@@ -452,7 +564,7 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 								unify(@:privateAccess checker.typeExpr(f.e, Value), TBool, c,"class",f.e);
 							}
 						default:
-							throw new domkit.Error("Invalid class value",a.pmin,a.pmax);
+							domkitError("Invalid class value",a.pmin,a.pmax);
 						}
 					}
 					continue;
@@ -465,13 +577,13 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 								case RawValue(str) if( str.indexOf(" ") < 0 ):
 									defineIdent(c, "#"+str);
 								default:
-									throw new domkit.Error("Auto-id reference invalid class",a.pmin,a.pmax);
+									domkitError("Auto-id reference invalid class",a.pmin,a.pmax);
 								}
 							}
 					case RawValue(id):
 						defineIdent(c, "#"+id);
 					case Code(_):
-						throw new domkit.Error("Not constant id is not allowed",a.pmin,a.pmax);
+						domkitError("Not constant id is not allowed",a.pmin,a.pmax);
 					}
 					continue;
 				default:
@@ -484,21 +596,26 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 						cur = cur.parent;
 					}
 					if( t == null )
-						throw new domkit.Error(c.name+" does not have property "+a.name, a.pmin, a.pmax);
+						domkitError(c.name+" does not have property "+a.name, a.pmin, a.pmax);
 					var pt = switch( a.value ) {
 					case RawValue(_): t_string;
-					case Code(code): typeCode(code, a.pmin);
+					case Code(code): typeCode(code, a.vmin);
 					}
 					unify(t, pt, c, a.name, a);
 					continue;
 				}
 				switch( a.value ) {
 				case RawValue(str):
-					typeProperty(pname, a.pmin, a.pmax, new domkit.CssParser().parseValue(str), c);
+					typeProperty(pname, a.vmin, a.pmax, new domkit.CssParser().parseValue(str), c);
 				case Code(code):
-					var t = typeCode(code, a.pmin);
+					var t = typeCode(code, a.vmin);
 					unify(t, p.type, c, pname, a);
 				}
+			}
+			if( e.condition != null ) {
+				var cond = e.condition;
+			 	var t = typeCode(cond.cond, cond.pmin);
+				unify(t, TBool, c, "if", cond);
 			}
 			for( c in e.children )
 				checkDMLRec(c);
@@ -522,9 +639,9 @@ class DomkitChecker extends ScriptEditor.ScriptChecker {
 		case Text(_):
 			// nothing
 		case CodeBlock(v):
-			throw new domkit.Error("Code block not supported", e.pmin);
+			domkitError("Code block not supported", e.pmin);
 		case Macro(id):
-			throw new domkit.Error("Macro not supported", e.pmin);
+			domkitError("Macro not supported", e.pmin);
 		}
 	}
 
@@ -569,6 +686,14 @@ class DomkitEditor extends CodeEditor {
 		}
 	}
 
+	public function getComponent() {
+		var compReg = ~/<([A-Za-z0-9_]+)/;
+		if( !compReg.match(code) )
+			return null;
+		var name = compReg.matched(1);
+		return checker.components.get(name);
+	}
+
 	override function getCompletion( position : Int ) {
 		var code = code;
 		var results = super.getCompletion(position);
@@ -588,7 +713,7 @@ class DomkitEditor extends CodeEditor {
 		}
 		switch( kind ) {
 		case Less:
-			for( c => def in checker.constants )
+			for( c => def in @:privateAccess checker.lastVariables )
 				results.push({
 					kind : Property,
 					label : "@"+c,

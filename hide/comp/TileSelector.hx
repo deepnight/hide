@@ -17,9 +17,44 @@ class TileSelector extends Component {
 	var image : Element;
 	var imageWidth : Int;
 	var imageHeight : Int;
-	var zoom : Float;
+	var zoom(get, never) : Float;
+	var zoomLevel(default, set) : Int;
 	var imageElt : js.html.ImageElement;
 	var modal : Element;
+	var container : Element;
+	var zoomSelector : Element;
+
+	var bgColor(default, set) : Int = 0xFF110022;
+	final maxZoom = 4;
+
+	function get_zoom() {
+		return Math.pow(2, zoomLevel);
+	}
+
+	function set_zoomLevel(v : Int) : Int {
+		zoomLevel = v;
+		if (zoomLevel < -maxZoom) {
+			zoomLevel = -maxZoom;
+		}
+		if (zoomLevel > maxZoom) {
+			zoomLevel = maxZoom;
+		}
+		saveDisplayState("zoomLevel", zoomLevel);
+		zoomSelector.val(zoomLevel);
+		return zoomLevel;
+	}
+
+	function set_bgColor(v: Int) : Int {
+		bgColor = v;
+		if (container != null) {
+			var vec = new h3d.Vector4();
+			vec.setColor(bgColor);
+			container.css("backgroundColor", 'rgba(${vec.r*255}, ${vec.g*255}, ${vec.b*255}, ${vec.a})');
+		}
+		saveDisplayState("bgColor", zoomLevel);
+		return bgColor;
+	}
+
 
 	public function new(file,size,?parent,?el) {
 		super(parent,el);
@@ -31,6 +66,7 @@ class TileSelector extends Component {
 
 	function set_file(file) {
 		this.file = file;
+		this.saveDisplayKey = 'tile-select/$file';
 		rebuild();
 		return file;
 	}
@@ -89,8 +125,10 @@ class TileSelector extends Component {
 	}
 
 	function rescale() {
-		image.height(imageHeight*zoom).width(imageWidth*zoom);
-		image.css("background-size",(imageWidth*zoom)+"px "+(imageHeight*zoom)+"px");
+		var h = zoom * imageHeight;
+		var w = zoom * imageWidth;
+		image.height(h).width(w);
+		image.css("background-size",(w)+"px "+(h)+"px");
 		updateCursor();
 	}
 
@@ -101,15 +139,25 @@ class TileSelector extends Component {
 		element.click((e) -> e.stopPropagation());
 		element.attr("tabindex","0");
 		element.focus();
+
+		var el = new Element(element[0].ownerDocument.body);
+		el.off('keydown.tileselector');
+		el.on('keydown.tileselector', function(e) {
+			if( e.keyCode == 27 ) {
+				onChange(true);
+				el.off('keydown.tileselector');
+			}
+		});
 		element.on("keydown", function(e) {
 			if( e.keyCode == 27 ) {
 				onChange(true);
+				el.off('keydown.tileselector');
 			}
 		});
 
-		var tool = new Toolbar(element);
+		var settings = new Element("<tile-settings></tile-settings>").appendTo(element);
 		if( allowFileChange ) {
-			var tex = new hide.comp.TextureSelect(tool.element);
+			var tex = new hide.comp.TextureSelect(settings);
 			tex.path = file;
 			tex.onChange = function() this.file = tex.path;
 		}
@@ -120,7 +168,7 @@ class TileSelector extends Component {
 			- Values in ratio (1/2 - it will take half of the image size)';
 
 			var widthEdit = new Element('<span class="dim-edit">Width:<input type="text" title="$tooltipText" value="${size.width}">px</span>')
-				.appendTo(tool.element);
+				.appendTo(settings);
 			widthEdit.find("input").on("blur", (e:js.jquery.Event) -> {
 				this.size.width = setSizeEdit(e.getThis(), this.size.width, imageWidth);
 				widthEdit.find("input").val(this.size.width);
@@ -129,7 +177,7 @@ class TileSelector extends Component {
 					widthEdit.find("input").blur();
 			});
 			var heightEdit = new Element('<span class="dim-edit">Height:<input type="text" title="$tooltipText" value="${size.height}">px</span>')
-				.appendTo(tool.element);
+				.appendTo(settings);
 			heightEdit.find("input").on("blur", (e:js.jquery.Event) -> {
 				this.size.height = setSizeEdit(e.getThis(), this.size.height, imageHeight);
 				heightEdit.find("input").val(this.size.height);
@@ -141,13 +189,34 @@ class TileSelector extends Component {
 			widthEdit.find("input").on("blur", updateCursor);
 			heightEdit.find("input").on("blur", updateCursor);
 		}
-		if( tool.element.children().length == 0 )
-			tool.remove();
+
+		var zoomElem = new Element("<div>Zoom:</div>").appendTo(settings);
+		zoomSelector = new Element("<select></select>").appendTo(zoomElem);
+		for (i in -maxZoom...(maxZoom+1)) {
+			var dispVal = Math.floor(Math.pow(2, i) * 100);
+			var option = new Element('<option value=$i>$dispVal%</option>').appendTo(zoomSelector);
+		}
+		zoomSelector.change((e) -> {
+			var val = zoomSelector.val();
+			var v = Std.parseInt(val);
+			zoomLevel = v;
+			rescale();
+		});
+
+		var backgroundSelector = new hide.comp.ColorPicker.ColorBox(settings, true, true);
+		backgroundSelector.value = bgColor;
+		backgroundSelector.onChange = (isDragging: Bool) -> {
+			bgColor = backgroundSelector.value;
+		}
+
+		if( settings.children().length == 0 ) {
+			settings.remove();
+		}
 
 		var url = ide.getUnCachedUrl(file);
-		var scroll = new Element("<div class='flex-scroll'><div class='scroll'>").appendTo(element).find(".scroll");
-		image = new Element('<div class="tile" style="background-image:url(\'$url\')"></div>').appendTo(scroll);
-
+		var tilePicker = new Element("<tile-picker></tile-picker>").appendTo(element);
+		container = new Element("<background-container></background-container>").appendTo(tilePicker);
+		image = new Element('<image-display style="background-image:url(\'$url\')"></image-display>').appendTo(container);
 		valueDisp = new Element('<div class="valueDisp">').appendTo(image);
 		cursor = new Element('<div class="cursor">').appendTo(image);
 		cursorPos = { x : -1, y : -1, x2 : -1, y2 : -1, dragSelect : false };
@@ -158,41 +227,45 @@ class TileSelector extends Component {
 			if( imageElt != i ) return;
 			imageWidth = i.width;
 			imageHeight = i.height;
-			zoom = Math.floor(hxd.Math.min(800 / imageWidth, 580 / imageHeight));
-			if( zoom <= 0 ) zoom = 1;
 
-			scroll.on("mousewheel", function(e:js.jquery.Event) {
-				if( untyped e.originalEvent.wheelDelta > 0 )
-					zoom++;
-				else if( zoom > 1 )
-					zoom--;
-				rescale();
-				e.preventDefault();
+			zoomLevel = getDisplayState("zoomLevel") ?? Math.floor(Math.log(hxd.Math.min(800 / imageWidth, 580 / imageHeight))/Math.log(2));
+
+			tilePicker.on("mousewheel", function(e:js.jquery.Event) {
+				if (e.ctrlKey) {
+					if( untyped e.originalEvent.wheelDelta > 0 )
+						zoomLevel++;
+					else
+						zoomLevel--;
+					rescale();
+					e.preventDefault();
+				}
 			});
 
-			scroll.parent().on("mousedown", function(e) {
+			modal.on("pointerdown", function(e) {
 				if( e.button == 2 ) {
+					modal.get(0).setPointerCapture(e.pointerId);
 					movePos.dragScrolling = true;
-					movePos.x = e.pageX;
-					movePos.y = e.pageY;
+
+					movePos.x = tilePicker[0].scrollLeft - e.pageX;
+					movePos.y = tilePicker[0].scrollTop - e.pageY;
 				}
 			});
 
-			modal.on("mousemove", function(e) {
+			modal.on("pointermove", function(e) {
 				if( movePos.dragScrolling ) {
-					var dx = e.pageX - movePos.x;
-					var dy = e.pageY - movePos.y;
+					var dx = e.pageX + movePos.x;
+					var dy = e.pageY + movePos.y;
 
-					element.find(".scroll")[0].scrollBy(-dx,-dy);
-					movePos.x = e.pageX;
-					movePos.y = e.pageY;
+					tilePicker[0].scrollTo(dx,dy);
 				}
 			});
 
-			image.on("mousemove", function(e:js.jquery.Event) {
+			image.on("pointermove", function(e:js.jquery.Event) {
 				if( movePos.dragScrolling )
 					return;
-				var k = { w: size.width * zoom, h: size.height * zoom };
+				var pow = Math.pow(2, zoomLevel);
+
+				var k = { w: size.width * pow, h: size.height * pow };
 				var x = Math.floor(e.offsetX / k.w);
 				var y = Math.floor(e.offsetY / k.h);
 				if( (x+1) * size.width > i.width ) x--;
@@ -207,7 +280,7 @@ class TileSelector extends Component {
 				}
 				updateCursor();
 			});
-			image.on("mousedown", function(e:js.jquery.Event) {
+			image.on("pointerdown", function(e:js.jquery.Event) {
 				if( movePos.dragScrolling )
 					return;
 				var k = { w: size.width * zoom, h: size.height * zoom };
@@ -221,11 +294,11 @@ class TileSelector extends Component {
 				if( e.button == 0 && allowRectSelect )
 					cursorPos.dragSelect = true;
 			});
-			modal.on("mouseup", function(e) {
+			modal.on("pointerup", function(e) {
 				movePos.dragScrolling = false;
 				cursorPos.dragSelect = false;
 			});
-			image.on("mouseup", function(e:js.jquery.Event) {
+			image.on("pointerup", function(e:js.jquery.Event) {
 				e.preventDefault();
 				movePos.dragScrolling = false;
 				cursorPos.dragSelect = false;
@@ -247,14 +320,29 @@ class TileSelector extends Component {
 				}
 				onChange(false);
 				e.stopPropagation();
+				trace("image pointerup");
 			});
 			modal.on("contextmenu", function(e) {
 				e.preventDefault();
 				e.stopPropagation();
 			});
 			rescale();
+
+			focusSelection();
 		};
 		i.src = url;
+
+		set_bgColor(bgColor);
+	}
+
+	function focusSelection() {
+		var w = container.width();
+		var h = container.height();
+		var pos = valueDisp.position();
+		pos.top += valueDisp.width() / 2.0;
+		pos.left += valueDisp.height() / 2.0;
+		container.scrollTop(pos.top - h/2.0);
+		container.scrollLeft(pos.left - w/2.0);
 	}
 
 	function setSizeEdit(element:Element, sizeValue:Int, maxValue:Int):Int {

@@ -1,4 +1,19 @@
 package hrt.prefab.rfx;
+@:access(h3d.scene.Renderer)
+
+class SaoMerge extends h3d.shader.ScreenShader {
+
+	static var SRC = {
+		@param var screenOcclusion : Sampler2D;
+		@param var materialOcclusionIntensity : Float;
+		@ignore @param var materialOcclusion : Channel;
+		
+		function fragment() {
+			pixelColor.rgb = screenOcclusion.get(calculatedUV).xxx;
+			pixelColor.rgb *= mix(1.0, materialOcclusion.get(calculatedUV).x, materialOcclusionIntensity);
+		}
+	}
+}
 
 class Sao extends RendererFX {
 
@@ -13,13 +28,18 @@ class Sao extends RendererFX {
 	@:s public var microIntensity : Float = 1;
 	@:s public var useWorldUV : Bool;
 	@:s public var noiseTexturePath: String;
+	@:s public var USE_FADE : Bool = false;
+	@:s public var fadeStart: Float = 100.0;
+	@:s public var fadeEnd: Float = 200.0;
 
 	var sao : h3d.pass.ScalableAO;
 	var saoBlur = new h3d.pass.Blur();
 	var saoCopy = new h3d.pass.Copy();
+	var saoMergePass = new h3d.pass.ScreenFx(new SaoMerge());
+	var saoTex : h3d.mat.Texture;
 
-	function new(?parent) {
-		super(parent);
+	function new(parent, shared: ContextShared) {
+		super(parent, shared);
 		blur = 5;
 		samples = 30;
 		radius = 1;
@@ -44,7 +64,7 @@ class Sao extends RendererFX {
 			r.mark("SSAO");
 			if( sao == null ) sao = new h3d.pass.ScalableAO();
 			var ctx = r.ctx;
-			var saoTex = r.allocTarget("sao",false, size); // TODO : R8
+			saoTex = r.allocTarget("sao",false, size); // TODO : R8
 			var normal : hxsl.ChannelTexture = ctx.getGlobal("normalMap");
 			var depth : hxsl.ChannelTexture = ctx.getGlobal("depthMap");
 			var occlu : hxsl.ChannelTexture = ctx.getGlobal("occlusionMap");
@@ -56,14 +76,14 @@ class Sao extends RendererFX {
 			sao.shader.depthTextureChannel = depth.channel;
 			sao.shader.normalTextureChannel = normal.channel;
 			sao.shader.useWorldUV = useWorldUV;
-			sao.shader.microOcclusion = occlu.texture;
-			sao.shader.microOcclusionChannel = occlu.channel;
-			sao.shader.microOcclusionIntensity = microIntensity;
 			sao.shader.noiseScale.set(noiseScale, noiseScale);
 			if( noiseTexturePath != null )
 				sao.shader.noiseTexture = loadNoiseTexture(noiseTexturePath, Repeat);
 			else
 				sao.shader.noiseTexture = h3d.mat.Texture.genNoise(128);
+			sao.shader.USE_FADE = USE_FADE;
+			sao.shader.fadeStart = fadeStart;
+			sao.shader.fadeEnd = fadeEnd;
 			sao.apply(depth.texture,normal.texture,ctx.camera);
 			ctx.engine.popTarget();
 
@@ -71,8 +91,17 @@ class Sao extends RendererFX {
 			saoBlur.quality = blurQuality;
 			saoBlur.apply(ctx, saoTex);
 
+			var saoMerge = r.allocTarget("saoMerge",false, 1.0);
+			ctx.engine.pushTarget(saoMerge);
+			saoMergePass.shader.materialOcclusionIntensity = microIntensity;
+			saoMergePass.shader.materialOcclusionChannel = occlu.channel;
+			saoMergePass.shader.materialOcclusion = occlu.texture;
+			saoMergePass.shader.screenOcclusion = saoTex;
+			saoMergePass.render();
+			ctx.engine.popTarget();
+
 			saoCopy.pass.setColorChannel(occlu.channel);
-			saoCopy.apply(saoTex, occlu.texture);
+			saoCopy.apply(saoMerge, occlu.texture);
 		}
 	}
 
@@ -85,7 +114,7 @@ class Sao extends RendererFX {
 				<dt>Radius</dt><dd><input type="range" min="0" max="10" field="radius"/></dd>
 				<dt>Bias</dt><dd><input type="range" min="0" max="0.5" field="bias"/></dd>
 				<dt>Texture Size</dt><dd><input type="range" min="0" max="1" field="size"/></dd>
-				<dt>Samples</dt><dd><input type="range" min="3" max="255" field="samples" step="1"/></dd>
+				<dt>Samples</dt><dd><input type="range" min="3" max="127" field="samples" step="1"/></dd>
 				<dt>Materials occlusion</dt><dd><input type="range" min="0" max="1" field="microIntensity"/></dd>
 			</dl>
 		</div>
@@ -101,12 +130,18 @@ class Sao extends RendererFX {
 				<dt>Size</dt><dd><input type="range" min="0" max="10" field="blur"/></dd>
 				<dt>Quality</dt><dd><input type="range" min="0" max="1" field="blurQuality"/></dd>
 			</dl>
+		</div>
+		<div class="group" name="Fade">
+			<dl>
+				<dt>Use fade</dt><dd><input type="checkbox" field="USE_FADE"/></dd>
+				<dt>Fade start</dt><dd><input type="range" field="fadeStart"/></dd>
+				<dt>Fade end</dt><dd><input type="range" field="fadeEnd"/></dd>
 			</dl>
 		</div>
 		'),this);
 	}
 	#end
 
-	static var _ = Library.register("rfx.sao", Sao);
+	static var _ = Prefab.register("rfx.sao", Sao);
 
 }

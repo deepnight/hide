@@ -41,9 +41,13 @@ class Text extends Object2D {
 			blendMode = Alpha;
 	}
 
-	override function updateInstance( ctx: Context, ?propName : String ) {
-		super.updateInstance(ctx, propName);
-		var h2dText = (cast ctx.local2d : h2d.HtmlText);
+	override public function copy(other:Prefab) {
+		super.copy(other);
+	}
+
+	override function updateInstance(?propName : String ) {
+		super.updateInstance(propName);
+		var h2dText = (cast local2d : h2d.HtmlText);
 		h2dText.visible = visible;
 		h2dText.textColor = color;
 		h2dText.maxWidth = maxWidth > 0 ? maxWidth : null;
@@ -107,15 +111,11 @@ class Text extends Object2D {
 		#end
 	}
 
-	override function makeInstance(ctx:Context):Context {
-		ctx = ctx.clone(this);
-		var h2dText = new h2d.HtmlText(hxd.res.DefaultFont.get(), ctx.local2d);
+	override function makeObject(parent2d:h2d.Object):h2d.Object {
+		var h2dText = new h2d.HtmlText(hxd.res.DefaultFont.get(), parent2d);
 		h2dText.text = "";
 		h2dText.smooth = true;
-		ctx.local2d = h2dText;
-		ctx.local2d.name = name;
-		updateInstance(ctx);
-		return ctx;
+		return h2dText;
 	}
 
 	public dynamic function loadFont() : h2d.Font {
@@ -137,8 +137,7 @@ class Text extends Object2D {
 
 	#if editor
 
-	override function makeInteractive(ctx:Context):h2d.Interactive {
-		var local2d = ctx.local2d;
+	override function makeInteractive():h2d.Interactive {
 		if(local2d == null)
 			return null;
 		var text = cast(local2d, h2d.Text);
@@ -149,7 +148,7 @@ class Text extends Object2D {
 		return int;
 	}
 
-	override function edit( ctx : EditContext ) {
+	override function edit( ctx : hide.prefab.EditContext ) {
 		super.edit(ctx);
 
 		var parameters = new hide.Element('<div class="group" name="Parameters"></div>');
@@ -177,17 +176,17 @@ class Text extends Object2D {
 		leftAlign.on("click", function(e) {
 			align = 0;
 			updateDisabled();
-			updateInstance(ctx.getContext(this), "align");
+			ctx.onChange(this, "align");
 		});
 		middleAlign.on("click", function(e) {
 			align = 1;
 			updateDisabled();
-			updateInstance(ctx.getContext(this), "align");
+			ctx.onChange(this, "align");
 		});
 		rightAlign.on("click", function(e) {
 			align = 2;
 			updateDisabled();
-			updateInstance(ctx.getContext(this), "align");
+			ctx.onChange(this, "align");
 		});
 		updateDisabled();
 
@@ -199,7 +198,7 @@ class Text extends Object2D {
 		if (this.pathFont != null && this.pathFont.length > 0) tfile.path = this.pathFont;
 		tfile.onChange = function() {
 			this.pathFont = tfile.path;
-			updateInstance(ctx.getContext(this), "src");
+			updateInstance("src");
 		}
 
 		new hide.Element('<dt>Color</dt><dd><input type="color" field="color" /></dd>').appendTo(gr);
@@ -246,12 +245,12 @@ class Text extends Object2D {
 		});
 	}
 
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "square", name : "Text" };
 	}
 
 	#end
 
-	static var _ = Library.register("text", Text);
+	static var _ = Prefab.register("text", Text);
 
 }

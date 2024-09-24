@@ -30,7 +30,7 @@ class ColorGradingTonemap extends hxsl.Shader {
 		}
 	}
 }
-
+@:access(h3d.scene.Renderer)
 class ColorGrading extends RendererFX {
 
 	var tonemap = new ColorGradingTonemap();
@@ -95,10 +95,12 @@ class ColorGrading extends RendererFX {
 			ctx.ide.chooseFileSave("defaultLUT.png", saveTexture);
 		});
 
-		ctx.properties.add(e, this);
+		ctx.properties.add(e, this, function(pname) {
+			ctx.onChange(this, pname);
+		});
 	}
 	#end
 
-	static var _ = Library.register("rfx.colorGrading", ColorGrading);
+	static var _ = Prefab.register("rfx.colorGrading", ColorGrading);
 
 }

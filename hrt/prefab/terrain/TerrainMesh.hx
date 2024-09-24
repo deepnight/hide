@@ -11,6 +11,7 @@ class TerrainMesh extends h3d.scene.Object {
 	public var tileSize : h2d.col.Point;
 	public var cellSize : h2d.col.Point;
 	public var cellCount : h2d.col.IPoint;
+	public var vertexPerMeter : Float;
 
 	public var heightMapResolution : h2d.col.IPoint;
 	public var weightMapResolution : h2d.col.IPoint;
@@ -28,6 +29,7 @@ class TerrainMesh extends h3d.scene.Object {
 	public var parallaxMaxStep : Int;
 	public var heightBlendStrength : Float;
 	public var blendSharpness : Float;
+	public var generateMipMaps : Bool;
 
 	// Data
 	var tiles : Array<Tile> = [];
@@ -98,25 +100,48 @@ class TerrainMesh extends h3d.scene.Object {
 			if( surfaces[i].albedo != null ) surfaceSize = hxd.Math.ceil(hxd.Math.max(surfaces[i].albedo.width, surfaceSize));
 
 		if(surfaceArray != null) surfaceArray.dispose();
-		surfaceArray = new Surface.SurfaceArray(surfaces.length, surfaceSize);
+		surfaceArray = new Surface.SurfaceArray(surfaces.length, surfaceSize, generateMipMaps);
+		var mipLevels = 1;
+		if ( generateMipMaps ) {
+			if ( !hxd.Math.isPOT(surfaceSize) )
+				throw "Terrain mip map generation needs power-of-two-sized textures";
+			mipLevels = 1;
+			while( surfaceSize > 1 << (mipLevels - 1) )
+				mipLevels++;
+		}
+		function toLayer(from, to, i) {
+			if ( from == null )
+				return;
+			h3d.pass.Copy.run(from, to, null, null, i);
+			if ( generateMipMaps ) {
+				var engine = h3d.Engine.getCurrent();
+				var copyPass = new h3d.pass.Copy();
+				for ( m in 1...mipLevels) {
+					engine.pushTarget(to, i, m);
+					copyPass.shader.texture = from;
+					copyPass.render();
+					engine.popTarget();
+				}
+			}
+		}
 		for( i in 0 ... surfaces.length ) {
-			if( surfaces[i].albedo != null ) h3d.pass.Copy.run(surfaces[i].albedo, surfaceArray.albedo, null, null, i);
-			if( surfaces[i].normal != null ) h3d.pass.Copy.run(surfaces[i].normal, surfaceArray.normal, null, null, i);
-			if( surfaces[i].pbr != null ) h3d.pass.Copy.run(surfaces[i].pbr, surfaceArray.pbr, null, null, i);
+			toLayer(surfaces[i].albedo, surfaceArray.albedo, i);
+			toLayer(surfaces[i].normal, surfaceArray.normal, i);
+			toLayer(surfaces[i].pbr, surfaceArray.pbr, i);
 		}
 
 		// OnContextLost support
 		surfaceArray.albedo.realloc = function() {
 			for( i in 0 ... surfaceArray.surfaceCount )
-				h3d.pass.Copy.run(surfaces[i].albedo, surfaceArray.albedo, null, null, i);
+				toLayer(surfaces[i].albedo, surfaceArray.albedo, i);
 		}
 		surfaceArray.normal.realloc = function() {
 			for( i in 0 ... surfaceArray.surfaceCount )
-				h3d.pass.Copy.run(surfaces[i].normal, surfaceArray.normal, null, null, i);
+				toLayer(surfaces[i].normal, surfaceArray.normal, i);
 		}
 		surfaceArray.pbr.realloc = function() {
 			for( i in 0 ... surfaceArray.surfaceCount )
-				h3d.pass.Copy.run(surfaces[i].pbr, surfaceArray.pbr, null, null, i);
+				toLayer(surfaces[i].pbr, surfaceArray.pbr, i);
 		}
 
 		updateSurfaceParams();
@@ -259,23 +284,50 @@ class TerrainMesh extends h3d.scene.Object {
 		return result == null ? createTile(tileX, tileY) : result;
 	}
 
-	public function getTiles( x : Float, y : Float, range : Float, ?create = false ) : Array<Tile> {
+	public function getTiles( x : Float, y : Float, range : Float, ?create = false, ?disconectedTiles = false ) : Array<Tile> {
 		var pos = toLocalPos(x, y);
 		if( create != null && create ) {
 			var maxTileX = Math.floor((pos.x + range)/ tileSize.x);
 			var minTileX = Math.floor((pos.x - range)/ tileSize.x);
 			var maxTileY = Math.floor((pos.y + range)/ tileSize.y);
 			var minTileY = Math.floor((pos.y - range)/ tileSize.y);
-			for( x in minTileX ... maxTileX + 1) {
-				for( y in minTileY...maxTileY + 1) {
-					var t = createTile(x, y);
-					#if editor
-					t.material.mainPass.stencil = new h3d.mat.Stencil();
-					t.material.mainPass.stencil.setFunc(Always, 0x01, 0x01, 0x01);
-					t.material.mainPass.stencil.setOp(Keep, Keep, Replace);
-					#end
+			var shouldCreate = disconectedTiles;
+			if (!shouldCreate && tiles.length == 0) {
+				// allow tile cration arount origin
+				shouldCreate = maxTileX >= 0 && minTileX<=0 && maxTileY>=0 && minTileY<=0;  
+			}
+			
+			// check if borders contains a tile
+			if (!shouldCreate) {
+				for (x in minTileX...maxTileX+1)
+				{
+					shouldCreate = getTile(x, maxTileY+1) != null || getTile(x, minTileY-1) != null;
+					if (shouldCreate)
+						break;
 				}
 			}
+			if (!shouldCreate) {
+				for (y in minTileY...maxTileY+1)
+				{
+					shouldCreate = getTile(maxTileX+1, y) != null || getTile(minTileX - 1, y) != null;
+					if (shouldCreate)
+						break;
+				}
+			}
+
+			if (shouldCreate) {
+				for( x in minTileX ... maxTileX + 1) {
+					for( y in minTileY...maxTileY + 1) {
+						var t = createTile(x, y);
+						#if editor
+						t.material.mainPass.stencil = new h3d.mat.Stencil();
+						t.material.mainPass.stencil.setFunc(Always, 0x01, 0x01, 0x01);
+						t.material.mainPass.stencil.setOp(Keep, Keep, Replace);
+						#end
+					}
+				}
+			}
+
 		}
 		var result : Array<Tile> = [];
 		for( tile in tiles)
@@ -291,6 +343,56 @@ class TerrainMesh extends h3d.scene.Object {
 		globalToLocal(tmpPt);
 		return tmpPt;
 	}
+
+	public function localRayIntersection(ray:h3d.col.Ray) : Float {
+		if( ray.lz > 0 )
+			return -1; // only from top
+		if( ray.lx == 0 && ray.ly == 0 ) {
+			var z = getLocalHeight(ray.px, ray.py);
+			if( z == null || z > ray.pz ) return -1;
+			return ray.pz - z;
+		}
+
+		var b = new h3d.col.Bounds();
+		for( t in tiles ) {
+			var cb = t.getCachedBounds();
+			if( cb != null )
+				b.add(cb);
+			else {
+				b.addPos(t.x, t.y, -10000);
+				b.addPos(t.x + cellSize.x * cellCount.x, t.y + cellSize.y * cellCount.y, 10000);
+			}
+		}
+
+		var dist = b.rayIntersection(ray, false);
+		if( dist < 0 ) {
+			// Check if we start IN the collision
+			if (!b.contains(ray.getPoint(0)))
+				return -1;
+			dist = 0;
+		}
+		var pt = ray.getPoint(dist);
+		var m = vertexPerMeter;
+		var prevH = getLocalHeight(pt.x, pt.y);
+		while( true ) {
+			pt.x += ray.lx * m;
+			pt.y += ray.ly * m;
+			pt.z += ray.lz * m;
+
+			if( !b.contains(pt) )
+				break;
+			var h = getLocalHeight(pt.x, pt.y);
+
+			if( pt.z < h ) {
+				var k = 1 - (prevH - (pt.z - ray.lz * m)) / (ray.lz * m - (h - prevH));
+				pt.x -= k * ray.lx * m;
+				pt.y -= k * ray.ly * m;
+				pt.z -= k * ray.lz * m;
+
+				return pt.sub(ray.getPos()).length();
+			}
+			prevH = h;
+		}
+		return -1;
+	}
 }
-
-

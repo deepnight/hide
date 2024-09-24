@@ -4,6 +4,7 @@ import hrt.prefab.Curve;
 import hrt.prefab.Prefab as PrefabElement;
 import hrt.prefab.fx.BaseFX.ObjectAnimation;
 import hrt.prefab.fx.BaseFX.ShaderAnimation;
+import hrt.prefab.fx.Event;
 
 
 @:allow(hrt.prefab.fx.FX)
@@ -17,19 +18,19 @@ class FXAnimation extends h3d.scene.Object {
 	public var loop : Bool = false;
 	public var duration : Float;
 
+
 	/** Enable automatic culling based on `cullingRadius` and `cullingDistance`. Will override `culled` on every sync. **/
 	public var autoCull(default, set) = true;
 	public var cullingRadius : Float;
 	public var cullingDistance = defaultCullingDistance;
 
-	public var blendFactor: Float;
-
 	public var objAnims: Array<ObjectAnimation>;
 	public var events: Array<hrt.prefab.fx.Event.EventInstance>;
 	public var emitters : Array<hrt.prefab.fx.Emitter.EmitterObject>;
 	public var trails : Array<hrt.prefab.l3d.Trails.TrailObj>;
-	public var shaderAnims : Array<ShaderAnimation> = [];
+	public var customAnims : Array<BaseFX.CustomAnimation> = [];
 	public var constraints : Array<hrt.prefab.l3d.Constraint>;
+	public var effects : Array<hrt.prefab.rfx.RendererFX>;
 
 	var evaluator : Evaluator;
 	var parentFX : FXAnimation;
@@ -37,6 +38,8 @@ class FXAnimation extends h3d.scene.Object {
 	var prevTime = -1.0;
 	var randSeed : Int;
 	var firstSync = true;
+
+	var onRemoveFun = null;
 
 	public function new(?parent) {
 		super(parent);
@@ -47,18 +50,40 @@ class FXAnimation extends h3d.scene.Object {
 		inheritCulled = true;
 	}
 
-	function init(ctx: Context, def: FX, ?root: PrefabElement) {
+	function init(def: FX, ?root: PrefabElement) {
 		if(root == null)
 			root = def;
-		initObjAnimations(ctx, root);
-		initEmitters(ctx, root);
-		BaseFX.getShaderAnims(ctx, root, shaderAnims);
-		if(shaderAnims.length == 0) shaderAnims = null;
-		events = initEvents(root, ctx);
-		var root = def.getFXRoot(ctx, def);
-		initConstraints(ctx, root != null ? root : def);
+		initObjAnimations(root);
+		initEmitters(root);
+		hrt.prefab.fx.BaseFX.BaseFXTools.getCustomAnimations(root, customAnims, null);
+		if(customAnims.length == 0) customAnims = null;
+		else {
+			for (a in customAnims) {
+				a.parameters = evaluator.parameters;
+			}
+		}
+
+		for (emitter in this.findAll((f) -> Std.downcast(f, hrt.prefab.fx.Emitter.EmitterObject))) {
+			@:privateAccess emitter.evaluator.parameters = evaluator.parameters;
+		}
+
+		events = initEvents(root, events);
+		var root = hrt.prefab.fx.BaseFX.BaseFXTools.getFXRoot(def);
+		initConstraints(root != null ? root : def);
 
 		trails = findAll((p) -> Std.downcast(p, hrt.prefab.l3d.Trails.TrailObj));
+		setParameters(def.parameters);
+
+		var effects : Array<hrt.prefab.rfx.RendererFX> = [];
+		for (p in def.flatten(hrt.prefab.rfx.RendererFX)) {
+			var rfx : hrt.prefab.rfx.RendererFX = cast p;
+			if (@:privateAccess rfx.instance == null)
+				continue;
+
+			if (this.effects == null)
+				this.effects = [];
+			this.effects.push(rfx);
+		}
 	}
 
 	public function reset() {
@@ -70,6 +95,19 @@ class FXAnimation extends h3d.scene.Object {
 				if(c != this)
 					c.reset();
 			}
+		}
+	}
+
+	public function setParameter(name: String, value: Dynamic) {
+		evaluator.parameters[name] = value;
+	}
+
+	public function setParameters(params: Array<Parameter>) {
+		evaluator.parameters.clear();
+		if (params == null)
+			return;
+		for (p in params) {
+			evaluator.parameters[p.name] = p.def;
 		}
 	}
 
@@ -117,6 +155,22 @@ class FXAnimation extends h3d.scene.Object {
 
 		var fullSync = ctx.visibleFlag || alwaysSyncAnimation || firstSync;
 		var finishedPlaying = false;
+
+		if (firstSync) {
+			var scene = getScene();
+			if (scene != null && effects != null) {
+				var renderer = scene.renderer;
+				for (rfx in effects) {
+					if (@:privateAccess rfx.instance == null)
+						continue;
+
+					renderer.effects.push(@:privateAccess rfx.instance);
+				}
+			}
+		}
+
+		var needIncrement = false;
+		var curTime = localTime;
 		if(playSpeed > 0 || firstSync) {
 			// This is done in syncRec() to make sure time and events are updated regarless of culling state,
 			// so we restore FX in correct state when unculled
@@ -128,16 +182,8 @@ class FXAnimation extends h3d.scene.Object {
 				setTime(t, fullSync);
 			}
 			else {
-				var curTime = localTime;
 				setTime(curTime, fullSync);
-				localTime += ctx.elapsedTime * playSpeed;
-				if( loop && duration > 0 ) {
-					localTime = (localTime % duration);
-				}
-				if( duration > 0 && curTime < duration && localTime >= duration) {
-					localTime = duration;
-					finishedPlaying = true;
-				}
+				needIncrement = true;
 			}
 		}
 
@@ -147,6 +193,16 @@ class FXAnimation extends h3d.scene.Object {
 
 		if(fullSync)
 			super.syncRec(ctx);
+		if (needIncrement) {
+			localTime += ctx.elapsedTime * playSpeed;
+			if( loop && duration > 0 ) {
+				localTime = (localTime % duration);
+			}
+			if( duration > 0 && curTime < duration && localTime >= duration) {
+				localTime = duration;
+				finishedPlaying = true;
+			}
+		}
 
 		if( finishedPlaying && onEnd != null )
 			onEnd();  // Delay until after syncRec, to avoid calling syncRec on children
@@ -161,6 +217,7 @@ class FXAnimation extends h3d.scene.Object {
 	public function setTime( time : Float, fullSync=true ) {
 		var dt = time - this.prevTime;
 		this.localTime = time;
+
 		if(fullSync) {
 			if(objAnims != null) {
 				for(anim in objAnims) {
@@ -191,6 +248,32 @@ class FXAnimation extends h3d.scene.Object {
 						}
 
 						anim.obj.setTransform(m);
+					}
+
+					// Animations that are only applied on local transforms of leafs objects
+					if (anim.localRotation != null || anim.localPosition != null) {
+						var leafObjects = anim.elt.findAll(Object3D, o -> o.children == null || o.children.length == 0);
+
+						for (o in leafObjects) {
+							var baseMat = o.getTransform();
+
+							tempMat.identity();
+							var m = tempMat;
+
+							if(anim.localRotation != null) {
+								var localRotation = evaluator.getVector(anim.localRotation, time, tempVec);
+								localRotation.scale3(Math.PI / 180.0);
+								m.rotate(localRotation.x, localRotation.y, localRotation.z);
+							}
+
+							if(anim.localPosition != null) {
+								var localPosition = evaluator.getVector(anim.localPosition, time, tempVec);
+								m.translate(localPosition.x, localPosition.y, localPosition.z);
+							}
+
+							m.multiply(m, baseMat);
+							o.local3d.setTransform(m);
+						}
 					}
 
 					if(anim.visibility != null)
@@ -248,8 +331,13 @@ class FXAnimation extends h3d.scene.Object {
 				}
 			}
 
-			if(shaderAnims != null)
-				for(anim in shaderAnims)
+			if (effects != null) {
+				for (e in effects)
+					@:privateAccess e.updateInstance();
+			}
+
+			if(customAnims != null)
+				for(anim in customAnims)
 					anim.setTime(time);
 
 			if(emitters != null) {
@@ -269,34 +357,28 @@ class FXAnimation extends h3d.scene.Object {
 		this.prevTime = localTime;
 	}
 
-	function initEvents(elt: PrefabElement, ctx: Context) {
+	function initEvents(elt: PrefabElement, ?out : Array<Event.EventInstance> ) {
 		var childEvents = [for(c in elt.children) if(c.enabled && c.to(Event) != null) c.to(Event)];
-		var ret = null;
 		for(evt in childEvents) {
-			var eventObj = evt.prepare(ctx);
+			var eventObj = evt.prepare();
 			if(eventObj == null) continue;
-			if(ret == null) ret = [];
-			ret.push(eventObj);
+			if(out == null) out = [];
+			out.push(eventObj);
 		}
-		return ret;
+		return out;
 	}
 
-	function initObjAnimations(ctx:Context, elt: PrefabElement) {
-		if(!elt.enabled) return;
+	function initObjAnimations(elt: PrefabElement) {
+		if(@:privateAccess !elt.shouldBeInstanciated()) return;
 		if(Std.downcast(elt, hrt.prefab.fx.Emitter) == null) {
 			// Don't extract animations for children of Emitters
 			for(c in elt.children) {
-				initObjAnimations(ctx, c);
+				initObjAnimations(c);
 			}
 		}
 
 		var obj3d = elt.to(hrt.prefab.Object3D);
 		if(obj3d == null)
-			return;
-
-		// TODO: Support references?
-		var objCtx = ctx.shared.contexts.get(elt);
-		if(objCtx == null || objCtx.local3d == null)
 			return;
 
 		var anyFound = false;
@@ -308,8 +390,7 @@ class FXAnimation extends h3d.scene.Object {
 
 			if (c == null)
 				return def;
-
-			return c.blendMode == CurveBlendMode.Blend ? VBlendCurve(c, blendFactor) : VCurve(c);
+			return c.makeVal();
 		}
 
 		function makeVector(name: String, defVal: Float, uniform: Bool=true, scale: Float=1.0) : Value {
@@ -320,13 +401,10 @@ class FXAnimation extends h3d.scene.Object {
 			anyFound = true;
 
 			if(uniform && curves.length == 1 && curves[0].name == name) {
-				if (curves[0].blendMode == CurveBlendMode.Blend)
-					return VBlendCurve(curves[0], blendFactor);
-
-				return scale != 1.0 ? VCurveScale(curves[0], scale) : VCurve(curves[0]);
+				return scale != 1.0 ? VMult(curves[0].makeVal(), VConst(scale)) : curves[0].makeVal();
 			}
 
-			return Curve.getVectorValue(curves, defVal, scale, blendFactor);
+			return Curve.getVectorValue(curves, defVal, scale);
 		}
 
 		function makeColor(name: String) {
@@ -339,29 +417,33 @@ class FXAnimation extends h3d.scene.Object {
 		}
 
 		var ap : AdditionalProperies = null;
-		if( Std.isOfType(objCtx.local3d, h3d.scene.pbr.PointLight)) {
+		var local3d = Object3D.getLocal3d(elt);
+
+		if( Std.isOfType(local3d, h3d.scene.pbr.PointLight)) {
 			ap = PointLight(makeColor("color"), makeVal("power", null), makeVal("size", null), makeVal("range", null) );
 		}
-		else if( Std.isOfType(objCtx.local3d, h3d.scene.pbr.SpotLight)) {
+		else if( Std.isOfType(local3d, h3d.scene.pbr.SpotLight)) {
 			ap = SpotLight(makeColor("color"), makeVal("power", null), makeVal("range", null), makeVal("angle", null), makeVal("fallOff", null) );
 		}
-		else if( Std.isOfType(objCtx.local3d, h3d.scene.pbr.DirLight)) {
+		else if( Std.isOfType(local3d, h3d.scene.pbr.DirLight)) {
 			ap = DirLight(makeColor("color"), makeVal("power", null));
 		}
 
 		var anim : ObjectAnimation = {
 			elt: obj3d,
-			obj: objCtx.local3d,
+			obj: local3d,
 			events: null,
 			position: makeVector("position", 0.0),
+			localPosition: makeVector("localPosition", 0.0),
 			scale: makeVector("scale", 1.0, true),
 			rotation: makeVector("rotation", 0.0, 360.0),
+			localRotation: makeVector("localRotation", 0.0, 360.0),
 			color: makeColor("color"),
 			visibility: makeVal("visibility", null),
 			additionalProperies: ap,
 		};
 
-		anim.events = initEvents(elt, objCtx);
+		anim.events = initEvents(elt);
 		if(anim.events != null)
 			anyFound = true;
 
@@ -371,26 +453,26 @@ class FXAnimation extends h3d.scene.Object {
 		}
 	}
 
-	function initEmitters(ctx: Context, elt: PrefabElement) {
+	function initEmitters(elt: PrefabElement) {
 		if(!elt.enabled) return;
 		var em = Std.downcast(elt, hrt.prefab.fx.Emitter);
 		if(em != null)  {
-			for(emCtx in ctx.shared.getContexts(elt)) {
-				if(emCtx.local3d == null) continue;
+			var local3d = Object3D.getLocal3d(em);
+			if (local3d != null) {
 				if(emitters == null) emitters = [];
-				var emobj : hrt.prefab.fx.Emitter.EmitterObject = cast emCtx.local3d;
+				var emobj : hrt.prefab.fx.Emitter.EmitterObject = cast local3d;
 				emobj.setRandSeed(randSeed);
 				emitters.push(emobj);
 			}
 		}
 		else {
 			for(c in elt.children) {
-				initEmitters(ctx, c);
+				initEmitters(c);
 			}
 		}
 	}
 
-	function initConstraints( ctx : Context, elt : PrefabElement ){
+	function initConstraints(elt : PrefabElement ){
 		if(!elt.enabled) return;
 		var co = Std.downcast(elt, hrt.prefab.l3d.Constraint);
 		if(co != null) {
@@ -399,7 +481,7 @@ class FXAnimation extends h3d.scene.Object {
 		}
 		else
 			for(c in elt.children)
-				initConstraints(ctx, c);
+				initConstraints(c);
 	}
 
 	public function resolveConstraints( caster : h3d.scene.Object ) {
@@ -419,40 +501,91 @@ class FXAnimation extends h3d.scene.Object {
 			}
 		}
 	}
+
+	override function onRemove() {
+		if ( onRemoveFun != null)
+			onRemoveFun();
+		super.onRemove();
+	}
 }
 
-class FX extends BaseFX {
+enum abstract ParameterType(String) {
+	var TBlend;
+}
+typedef Parameter = {
+	var type: ParameterType;
+	var name: String;
+	var color: Int;
+	var def: Dynamic;
+};
 
-	public function new() {
-		super();
-		type = "fx";
+typedef ShaderTarget = {
+	name : String,
+	object : h3d.scene.Object
+};
+
+class FX extends Object3D implements BaseFX {
+
+	@:s public var duration : Float;
+	@:s public var startDelay : Float = 0.0;
+	@:c public var scriptCode : String;
+	@:s public var cullingRadius : Float;
+	@:s public var markers : Array<{t: Float}> = [];
+
+	@:s public var parameters : Array<Parameter> = [];
+
+	var shaderTargets : Array<ShaderTarget> = null;
+
+	#if editor
+	static var identRegex = ~/^[A-Za-z_][A-Za-z0-9_]*$/;
+	#end
+
+	/*override function save(data : Dynamic) {
+		super.save(data);
+		data.cullingRadius = cullingRadius;
+		if( scriptCode != "" ) data.scriptCode = scriptCode;
+	}*/
+
+	public function new(parent:Prefab, contextShared: ContextShared) {
+		super(parent, contextShared);
+		duration = 5.0;
 		cullingRadius = 3.0;
-		blendFactor = 1.0;
 	}
 
-	override function save() {
-		var obj : Dynamic = super.save();
-		obj.cullingRadius = cullingRadius;
-		obj.blendFactor = blendFactor;
-		if( scriptCode != "" ) obj.scriptCode = scriptCode;
-		return obj;
+	override function make( ?sh:hrt.prefab.Prefab.ContextMake) : Prefab  {
+		if ( shaderTargets != null) {
+			for ( target in shaderTargets ) {
+				var shadersRoot = find(Prefab, p -> target.name == p.name);
+				if ( shadersRoot == null )
+					continue;
+				var newRoot = new hrt.prefab.Object3D(null, sh);
+				for ( c in shadersRoot.children )
+					if ( Std.isOfType(c, Shader) )
+						c.parent = newRoot;
+				newRoot.name = shadersRoot.name;
+				newRoot.parent = shadersRoot.parent;
+				shadersRoot.parent = null;
+			}
+		}
+
+		var fromRef = shared.parentPrefab != null;
+		var useFXRoot = #if editor fromRef #else true #end;
+		var root = hrt.prefab.fx.BaseFX.BaseFXTools.getFXRoot(this);
+		if(useFXRoot && root != null){
+			var childrenBackup = children;
+			children = [root];
+			var r = super.__makeInternal(sh);
+			children = childrenBackup;
+			return r;
+		}
+		else
+			return super.__makeInternal(sh);
 	}
 
-	override function load( obj : Dynamic ) {
-		super.load(obj);
-		if(obj.cullingRadius != null)
-			cullingRadius = obj.cullingRadius;
-		if(obj.blendFactor != null)
-			blendFactor = obj.blendFactor;
-		scriptCode = obj.scriptCode;
-	}
-
-	override function make( ctx : Context ) : Context {
-		ctx = ctx.clone(this);
-		var fxanim = createInstance(ctx.local3d);
+	override function makeObject(parent3d:h3d.scene.Object):h3d.scene.Object {
+		var fxanim = createInstance(parent3d);
 		fxanim.duration = duration;
 		fxanim.cullingRadius = cullingRadius;
-		fxanim.blendFactor = blendFactor;
 
 		var p = fxanim.parent;
 		while(p != null) {
@@ -464,8 +597,7 @@ class FX extends BaseFX {
 			p = p.parent;
 		}
 
-		ctx.local3d = fxanim;
-		var fromRef = ctx.shared.parent != null;
+		var fromRef = shared.parentPrefab != null;
 		#if editor
 		// only play if we are as a reference
 		if( fromRef ) fxanim.playSpeed = 1.0;
@@ -473,63 +605,272 @@ class FX extends BaseFX {
 		fxanim.playSpeed = 1.0;
 		#end
 
-		var useFXRoot = #if editor fromRef #else true #end;
-		var root = getFXRoot(ctx, this);
-		if(useFXRoot && root != null){
-			root.make(ctx);
-		}
-		else
-			super.make(ctx);
-		fxanim.init(ctx, this, root);
-
-		return ctx;
+		return fxanim;
 	}
 
-	override function updateInstance( ctx: Context, ?propName : String ) {
-		super.updateInstance(ctx, null);
-		var fxanim = Std.downcast(ctx.local3d, FXAnimation);
+	override function updateInstance(?propName : String ) {
+		super.updateInstance(null);
+		var fxanim = Std.downcast(local3d, FXAnimation);
 		fxanim.duration = duration;
 		fxanim.cullingRadius = cullingRadius;
-		fxanim.blendFactor = blendFactor;
 
-		// Populate the value among blend curves
-		var curves = this.flatten(Curve);
-		for (curve in curves) {
-			if (curve.blendMode == CurveBlendMode.Blend)
-				curve.blendFactor = blendFactor;
-		}
+		fxanim.setParameters(parameters);
+	}
+
+	public override function postMakeInstance() {
+		var root = hrt.prefab.fx.BaseFX.BaseFXTools.getFXRoot(this);
+		var fxAnim = Std.downcast(local3d, FXAnimation);
+		if (fxAnim == null)
+			return;
+
+		fxAnim.init(this, root);
+
+		if ( shaderTargets != null )
+			applyShadersToTargets();
 	}
 
 	function createInstance(parent: h3d.scene.Object) : FXAnimation {
 		return new FXAnimation(parent);
 	}
 
-	#if editor
-
-	override function refreshObjectAnims(ctx: Context) {
-		var fxanim = Std.downcast(ctx.local3d, FXAnimation);
-		fxanim.objAnims = null;
-		fxanim.initObjAnimations(ctx, this);
+	public function setShaderTargets( targets : Array<ShaderTarget>) {
+		if ( !shared.isInstance )
+			throw "Shader targets must be set on an instance";
+ 		shaderTargets = targets;
+		if ( local3d != null )
+			applyShadersToTargets();
 	}
 
-	override function edit( ctx : EditContext ) {
+	function applyShadersToTargets() {
+		for ( target in shaderTargets ) {
+			if ( target.object == null )
+				continue;
+			var shadersRoot = find(Prefab, p -> target.name == p.name);
+			if ( shadersRoot == null )
+				continue;
+			applyShadersToTarget(shadersRoot, target.object);
+		}
+
+		var fxAnim : FXAnimation = cast local3d;
+		fxAnim.onRemoveFun = function() {
+			for ( target in shaderTargets ) {
+				if ( target.object == null )
+					continue;
+				var shadersRoot = find(Prefab, p -> target.name == p.name);
+				if ( shadersRoot == null )
+					continue;
+				removeShadersFromTarget(shadersRoot, target.object);
+			}
+		}
+	}
+
+	function applyShadersToTarget( source : Prefab, target : h3d.scene.Object ) {
+		var shaders = source.findAll(Shader);
+        var mats = target.getMaterials();
+        for ( m in mats )
+            for ( s in shaders)
+                m.mainPass.addShader(s.shader);
+	}
+
+    function removeShadersFromTarget( source : Prefab, target : h3d.scene.Object ) {
+        var shaders = source.findAll(Shader);
+        var mats = target.getMaterials();
+        for ( m in mats )
+            for ( s in shaders)
+                m.mainPass.removeShader(s.shader);
+    }
+
+	#if editor
+
+	override function onEditorTreeChanged(child: Prefab) : hrt.prefab.Prefab.TreeChangedResult {
+		return Rebuild;
+	}
+
+	public function refreshObjectAnims() : Void {
+		var fxanim = Std.downcast(local3d, FXAnimation);
+		fxanim.objAnims = null;
+		fxanim.initObjAnimations(this);
+	}
+
+	override function edit( ctx : hide.prefab.EditContext ) {
 		var props = new hide.Element('
 			<div class="group" name="FX Scene">
 				<dl>
 					<dt>Duration</dt><dd><input type="number" value="0" field="duration"/></dd>
 					<dt>Culling radius</dt><dd><input type="number" field="cullingRadius"/></dd>
-					<dt>Blend factor</dt><dd><input type="range" field="blendFactor" min="0" max="1"/></dd>
 				</dl>
 			</div>');
 		ctx.properties.add(props, this, function(pname) {
 			ctx.onChange(this, pname);
 		});
+
+		var param = new hide.Element('
+			<div class="group flex-props fx-params" name="Parameters">
+				<dl id="params">
+				</dl>
+				<dl>
+				<dt></dt><dd><input type="button" value="Add Parameter" id="addParamButton"/></dd>
+				</dl>
+			</div>
+		'
+		);
+
+		function isParameterNameUnique(name: String) {
+			for (p in parameters) {
+				if (p.name == name) return false;
+			}
+			return true;
+		}
+
+		function rebuildParameters() {
+			var params = param.find("#params");
+			(params.get(0):Dynamic).replaceChildren();
+			if (parameters != null) {
+				for (i => p in parameters) {
+					var line = new hide.Element('<div class="hover-parent"/>');
+					line.appendTo(params);
+					var elem = new hide.Element('<dt class="flex"><div id="color"></div><span id="name" contenteditable class="fill"></span></dt>').appendTo(line);
+					var editable = new hide.comp.ContentEditable(null, elem.find("#name"));
+					editable.value = p.name;
+					editable.spellcheck = false;
+					editable.onChange = function(v: String) {
+						var error = false;
+						if (!identRegex.match(v)) {
+							hide.Ide.inst.quickMessage('Parameter name "$v" is not a valid identifier');
+							error = true;
+						}
+						else if (!isParameterNameUnique(v)) {
+							hide.Ide.inst.quickMessage('Parameter "$v" already exists');
+							error = true;
+						}
+						if (error) {
+							editable.value = p.name;
+							return;
+						}
+
+						var old = p.name;
+						var fn = function(isUndo: Bool) {
+							var from = isUndo ? v : old;
+							var to = isUndo ? old : v;
+							p.name = to;
+
+							// rename all curves that used this param as a blendParam
+							var curves = flatten(Curve);
+							for (c in curves) {
+								if (c.blendMode == Blend && c.blendParam == from) {
+									c.blendParam = to;
+								}
+							}
+
+							editable.value = p.name;
+							ctx.onChange(this, "parameters");
+							ctx.rebuildPrefab(this);
+						}
+						ctx.properties.undo.change(Custom(fn));
+						fn(false);
+					};
+
+					var colorPicker = new hide.comp.ColorPicker.ColorBox(null, elem.find("#color"), true, false);
+					colorPicker.value = p.color;
+					colorPicker.element.width(8);
+					colorPicker.element.height(16);
+					var lastColor = p.color;
+					colorPicker.onChange = function(temp: Bool) {
+						if (temp) {
+							p.color = colorPicker.value;
+							ctx.onChange(this, "parameters");
+						}
+						else {
+							var old = lastColor;
+							var current = colorPicker.value;
+							var fn = function(isUndo : Bool) {
+								p.color = isUndo ? old : current;
+								colorPicker.value = p.color;
+								ctx.rebuildPrefab(this, false);
+							}
+							ctx.properties.undo.change(Custom(fn));
+							fn(false);
+						}
+					}
+
+					var dd = new hide.Element('<dd class="flex">').appendTo(line);
+					var range = new hide.comp.Range(dd, new hide.Element('<input min="0" max="1" type="range"/>'));
+					var btn = new hide.Element('<div class="tb-group small hover-reveal"><div class="button2"><div class="icon ico ico-times"></div></div></div>').appendTo(dd);
+					btn.find(".button2").get(0).onclick = function(e) {
+						var fn = function(isUndo: Bool) {
+							if (!isUndo) {
+								parameters.splice(i, 1);
+							}
+							else {
+								parameters.insert(i, p);
+							}
+							rebuildParameters();
+							ctx.onChange(this, "parameters");
+						}
+						ctx.properties.undo.change(Custom(fn));
+						fn(false);
+					}
+
+					range.value = p.def;
+					var lastDef = p.def;
+					range.onChange = function(temp: Bool) {
+						if (temp) {
+							p.def = range.value;
+							ctx.onChange(this, "parameters");
+						}
+						else {
+							var old = lastDef;
+							var current = range.value;
+							lastDef = current;
+							var fn = function(isUndo: Bool) {
+								p.def = isUndo ? old : current;
+								range.value = p.def;
+								ctx.onChange(this, "parameters");
+							}
+							ctx.properties.undo.change(Custom(fn));
+							fn(false);
+						}
+					}
+				}
+			}
+		}
+
+
+
+		param.find("#addParamButton").get(0).onclick = (_) -> {
+
+			var color = hrt.impl.ColorSpace.HSLtoiRGB(new h3d.Vector4((parameters.length * 0.618033988749895) % 1.0, 0.75, 0.5), null).toInt(false);
+			var paramName = "newParam";
+			var i = 0;
+			while (!isParameterNameUnique(paramName)) {
+				i ++;
+				paramName = 'newParam$i';
+			}
+			var newElem = {type: TBlend, name: paramName, color: color, def: 0.0};
+			var fn = function(isUndo: Bool) {
+				if (!isUndo) {
+					parameters.push(newElem);
+				} else {
+					parameters.pop();
+				}
+				ctx.onChange(this, "parameters");
+				rebuildParameters();
+			}
+			ctx.properties.undo.change(Custom(fn));
+			fn(false);
+		};
+
+		ctx.properties.add(param);
+
+		rebuildParameters();
+
 	}
 
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "cube", name : "FX", allowParent: _ -> false};
 	}
 	#end
 
-	static var _ = Library.register("fx", FX, "fx");
+	// TOCO(ces) : restore extension support
+	static var _ = Prefab.register("fx", FX, "fx");
 }

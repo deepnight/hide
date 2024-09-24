@@ -4,6 +4,10 @@ import h3d.scene.Mesh;
 import h3d.scene.Object;
 import h3d.mat.PbrMaterial;
 
+#if editor
+import hide.prefab.HideProps;
+#end
+
 class Material extends Prefab {
 
 	@:s public var wrapRepeat = false;
@@ -16,19 +20,28 @@ class Material extends Prefab {
 	@:s public var refMatLib : String;
 	@:s public var overrides : Array<Dynamic> = [];
 
-	public function new(?parent) {
-		super(parent);
-		type = "material";
+	#if editor
+	var previewSphere : h3d.scene.Object;
+	#end
+
+	public function new(parent, shared: ContextShared) {
+		super(parent, shared);
 		props = {};
 	}
 
-	override function load(obj:Dynamic) {
+	override function load(obj:Dynamic) : Void {
 		super.load(obj);
 		color = obj.color != null ? obj.color : [1,1,1,1];
 	}
 
-	override function save() {
-		var obj : Dynamic = super.save();
+	override function copy(o:Prefab) : Void {
+		super.copy(o);
+		var p = Std.downcast(o, Material);
+		this.color = p.color;
+	}
+
+	override function save() : Dynamic {
+		var obj = super.save();
 		if(color != null && h3d.Vector.fromArray(color).toColor() != 0xffffffff) obj.color = color;
 		if(mainPassName == "" || mainPassName == null ) Reflect.deleteField(obj, "mainPassName");
 		return obj;
@@ -49,9 +62,32 @@ class Material extends Prefab {
 		return r;
 	}
 
-	public function getMaterials( ctx : Context ) {
-		var mats = ctx.local3d.getMaterials();
-		var mat = Lambda.find(mats, m -> m.name == this.name || (m.name != null && m.name == materialName));
+	public function getMaterials(includePreviewMats : Bool = false) {
+		var mats = findFirstLocal3d().getMaterials();
+
+		#if editor
+		if (this.previewSphere != null)
+			mats = previewSphere.getMaterials();
+
+		if (!includePreviewMats && mats != null) {
+			var idx = mats.length - 1;
+			while (idx >= 0) {
+				if (mats[idx].name == "previewMat")
+					mats.remove(mats[idx]);
+
+				idx--;
+			}
+		}
+		#end
+
+		var mat = Lambda.find(mats, function(m) {
+			#if editor
+			if (m.name != null && m.name == "previewMat")
+				return false;
+			#end
+			return m.name == this.name || (m.name != null && m.name == materialName);
+		});
+
 		return mat == null ? mats : [mat];
 	}
 
@@ -79,11 +115,61 @@ class Material extends Prefab {
 			mat.mainPass.setPassName(mainPassName);
 	}
 
-	override function updateInstance( ctx : Context, ?propName ) {
-		if( ctx.local3d == null )
+	override function makeInstance() {
+		#if editor
+		if (previewSphere != null) {
+			previewSphere.remove();
+			previewSphere = null;
+		}
+
+		var isMatLib = shared.editor != null && shared.parentPrefab == null;
+		if (isMatLib) {
+			var flat = getRoot().flatten(Prefab);
+			for (f in flat) {
+				var cl = Type.getClass(f);
+				if (cl != hrt.prefab.Object3D && cl != hrt.prefab.Prefab && Std.downcast(f, hrt.prefab.Material) == null && Std.downcast(f, Shader) == null) {
+					isMatLib = false;
+					break;
+				}
+			}
+		}
+
+
+		if (isMatLib) {
+			var root = shared.root3d;
+
+			var sphere = new h3d.prim.Sphere(1., 64, 48);
+			sphere.addUVs();
+			sphere.addNormals();
+			sphere.addTangents();
+			sphere.colors = sphere.points;
+
+			var m = new h3d.scene.Mesh(sphere);
+			m.name = "previewSphereObjName";
+			@:privateAccess m.material.name = "previewMat";
+			previewSphere = m;
+			root.addChild(previewSphere);
+			var flat = getRoot(false).flatten(Material);
+			@:privateAccess var pos = flat.indexOf(this);
+			previewSphere.x = ( pos - 1) * 5.0;
+		}
+		#end
+
+		updateInstance();
+	}
+
+	#if editor
+	override function findFirstLocal3d() {
+		return previewSphere ?? super.findFirstLocal3d();
+	}
+	#end
+
+	override function updateInstance(?propName ) {
+		var local3d = findFirstLocal3d();
+		if( local3d == null )
 			return;
 
-		var mats = getMaterials(ctx);
+		var mats = getMaterials(true);
 
 		if (this.refMatLib != null && this.refMatLib != "") {
 			// We want to save some infos to reapply them after loading datas from the choosen mat
@@ -95,7 +181,7 @@ class Material extends Prefab {
 			var refMatLibPath = this.refMatLib.substring(0, this.refMatLib.lastIndexOf("/"));
 			var refMatName = this.refMatLib.substring(this.refMatLib.lastIndexOf("/") + 1);
 
-			var prefabLib = hxd.res.Loader.currentInstance.load(refMatLibPath).toPrefab().load().clone(true);
+			var prefabLib = hxd.res.Loader.currentInstance.load(refMatLibPath).toPrefab().load();
 
 			for(c in prefabLib.children) {
 				if (c.name != refMatName)
@@ -114,33 +200,13 @@ class Material extends Prefab {
 			}
 		}
 
-
 		var props = renderProps();
-		#if editor
-		if ( mats == null || mats.length == 0 ) {
-			var sphere = new h3d.prim.Sphere(1., 64, 48);
-			sphere.addUVs();
-			sphere.addNormals();
-			sphere.addTangents();
-			var preview = new h3d.scene.Mesh(sphere);
-			preview.name = "materialPreviewSphere";
-			ctx.local3d.parent.addChild(preview);
-			ctx.local3d = preview;
-			ctx.local3d.x = ctx.local3d.getScene().getMaterials().length * 5.0;
-			mats = getMaterials(ctx);
+
+		function loadTextureCb( path : String ) : h3d.mat.Texture {
+			return shared.loadTexture(path, false);
 		}
-		#end
 		for( m in mats )
-			update(m, props, ctx.loadTexture);
-	}
-
-	override function makeInstance(ctx:Context):Context {
-		if(ctx.local3d == null)
-			return ctx;
-		ctx = ctx.clone(this);
-
-		updateInstance(ctx);
-		return ctx;
+			update(m, props, loadTextureCb);
 	}
 
 	function applyOverrides() {
@@ -157,9 +223,13 @@ class Material extends Prefab {
 		}
 
 		for (o in overrides) {
-			if (o.pname.indexOf("/") > 0) {
+			if (!Reflect.hasField(o, "pname"))
+				throw "Overriden property should have a name";
 
-				var pname = o.pname.substring(o.pname.indexOf("/") + 1);
+			var pname : String = o.pname;
+			if (pname.indexOf("/") > 0) {
+
+				pname = pname.substring(pname.indexOf("/") + 1);
 				var v = o.value;
 
 				if (v == "__toremove") {
@@ -170,7 +240,7 @@ class Material extends Prefab {
 				}
 			}
 			else {
-				Reflect.setProperty(this, o.pname, o.value);
+				Reflect.setProperty(this, pname, o.value);
 			}
 		}
 
@@ -179,7 +249,29 @@ class Material extends Prefab {
 	}
 
 	#if editor
-	override function edit( ctx : EditContext ) {
+	override function editorRemoveInstance() : Void {
+		if (previewSphere != null) {
+			previewSphere.remove();
+		}
+		else {
+			// temporary untill we find a proper way to remove a material
+			shared.editor.queueRebuild(parent);
+		}
+		super.editorRemoveInstance();
+	}
+
+	override function makeInteractive() : hxd.SceneEvents.Interactive {
+		if (previewSphere != null) {
+			var col = new h3d.col.Sphere(0,0,0,1.);
+			var int = new h3d.scene.Interactive(col, previewSphere);
+			int.propagateEvents = true;
+			int.enableRightButton = true;
+			return int;
+		}
+		return null;
+	}
+
+	override function edit( ctx : hide.prefab.EditContext ) {
 		super.edit(ctx);
 
 		var isPbr = Std.isOfType(ctx.scene.s3d.renderer, h3d.scene.pbr.Renderer);
@@ -222,39 +314,39 @@ class Material extends Prefab {
 
 		function updateLibSelect() {
 			libSelect.empty();
-			new Element('<option value="">None</option>').appendTo(libSelect);
+			new hide.Element('<option value="">None</option>').appendTo(libSelect);
 
 			for (idx in 0...matLibs.length) {
-				new Element('<option value="${matLibs[idx].name}" ${(selectedLib == matLibs[idx].path) ? 'selected' : ''}>${matLibs[idx].name}</option>');
+				new hide.Element('<option value="${matLibs[idx].name}" ${(selectedLib == matLibs[idx].path) ? 'selected' : ''}>${matLibs[idx].name}</option>');
 			}
 		}
 
 		function updateMatSelect() {
 			matSelect.empty();
-			new Element('<option value="">None</option>').appendTo(matSelect);
+			new hide.Element('<option value="">None</option>').appendTo(matSelect);
 
 			materials = ctx.scene.listMaterialFromLibrary(this.getAbsPath(), libSelect.val());
 
 			for (idx in 0...materials.length) {
-				new Element('<option value="${materials[idx].path + "/" + materials[idx].mat.name}" ${(selectedMat == materials[idx].mat.name) ? 'selected' : ''}>${materials[idx].mat.name}</option>').appendTo(matSelect);
+				new hide.Element('<option value="${materials[idx].path + "/" + materials[idx].mat.name}" ${(selectedMat == materials[idx].mat.name) ? 'selected' : ''}>${materials[idx].mat.name}</option>').appendTo(matSelect);
 			}
 		}
 
 		function updateMat() {
-			var previousMat = this.clone();
+			var previousMat = this.serialize();
 			var mat = ctx.scene.findMat(materials, matSelect.val());
 			if ( mat != null ) {
 				var previousName = this.name;
 				this.load(Reflect.field(mat, "mat"));
 				this.name = previousName;
 				this.refMatLib = Reflect.field(mat, "path") + "/" + Reflect.field(mat, "mat").name;
-				updateInstance(ctx.scene.editor.getContext(this));
+				updateInstance();
 				ctx.rebuildProperties();
 			} else {
 				this.refMatLib = "";
 			}
 
-			var newMat = this.clone();
+			var newMat = this.serialize();
 
 			ctx.properties.undo.change(Custom(function(undo) {
 				if( undo ) {
@@ -267,7 +359,7 @@ class Material extends Prefab {
 				updateLibSelect();
 				updateMatSelect();
 				ctx.rebuildProperties();
-				updateInstance(ctx.scene.editor.getContext(this));
+				updateInstance();
 			}));
 		}
 
@@ -295,7 +387,7 @@ class Material extends Prefab {
 						for (p in @:privateAccess prefabView.data.flatten(Prefab)) {
 							if (p.name == matName) {
 								prefabView.sceneEditor.selectElements([p]);
-								@:privateAccess prefabView.sceneEditor.focusSelection();
+								@:privateAccess prefabView.sceneEditor.focusObjects([Std.downcast(p, hrt.prefab.Material).previewSphere]);
 							}
 						}
 					}, 500);
@@ -335,7 +427,7 @@ class Material extends Prefab {
 
 			ctx.onChange(this, "props");
 
-			var fx = getParent(hrt.prefab.fx.FX);
+			var fx = findParent(hrt.prefab.fx.FX);
 			if(fx != null)
 				ctx.rebuildPrefab(fx, true);
 		});
@@ -355,12 +447,12 @@ class Material extends Prefab {
 			</div>');
 			ctx.properties.add(colorMask, this, function(pname) {
 				ctx.onChange(this, pname);
-				var fx = getParent(hrt.prefab.fx.FX);
+				var fx = findParent(hrt.prefab.fx.FX);
 				if(fx != null)
 					ctx.rebuildPrefab(fx, true);
 			});
 
-			function setBit( e : Element, field : String, className : String, bitIndex : Int ) {
+			function setBit( e : hide.Element, field : String, className : String, bitIndex : Int ) {
 				var mask = e.find(className);
 				var val : Int = cast Reflect.field(pbrProps, field);
 				mask.prop("checked", val & (1<<bitIndex) > 0 ? true : false);
@@ -378,7 +470,7 @@ class Material extends Prefab {
 						mask.prop("checked", val & (1<<bitIndex) > 0 ? true : false);
 					}));
 
-					var fx = getParent(hrt.prefab.fx.FX);
+					var fx = findParent(hrt.prefab.fx.FX);
 					if(fx != null)
 						ctx.rebuildPrefab(fx, true);
 				});
@@ -499,10 +591,13 @@ class Material extends Prefab {
 					<dt>Name</dt><dd><select><option value="any">Any</option></select>
 				</dl> ');
 		var select = dropDownMaterials.find("select");
-		var materialList = ctx.rootContext.local3d.getMaterials();
-		for( m in materialList )
-			if( m.name != null && m.name != "" )
-				new hide.Element('<option>').attr("value", m.name).text(m.name).appendTo(select);
+		var materialList = findFirstLocal3d()?.getMaterials();
+		if (materialList != null) {
+			for( m in materialList )
+				if( m.name != null && m.name != "" )
+					new hide.Element('<option>').attr("value", m.name).text(m.name).appendTo(select);
+		}
+
 
 		select.change(function(_) {
 			var previous = materialName;
@@ -512,13 +607,13 @@ class Material extends Prefab {
 				materialName = undo ? previous : actual;
 				ctx.onChange(this, null);
 				ctx.rebuildProperties();
-				ctx.scene.editor.refresh();
+				ctx.scene.editor.queueRebuild(this);
 			}));
 			ctx.onChange(this, null);
 			ctx.rebuildProperties();
-			ctx.scene.editor.refresh();
+			ctx.scene.editor.queueRebuild(this);
 
-			var fx = getParent(hrt.prefab.fx.FX);
+			var fx = findParent(hrt.prefab.fx.FX);
 			if(fx != null)
 				ctx.rebuildPrefab(fx, true);
 		});
@@ -541,7 +636,7 @@ class Material extends Prefab {
 			if (this.refMatLib != null && this.refMatLib != "")
 				addOverrideProperty(ctx, pname, false);
 
-			var fx = getParent(hrt.prefab.fx.FX);
+			var fx = findParent(hrt.prefab.fx.FX);
 			if(fx != null)
 				ctx.rebuildPrefab(fx, true);
 		});
@@ -549,7 +644,7 @@ class Material extends Prefab {
 		updateHighlightOverrides(ctx);
 	}
 
-	public function addOverrideProperty(ctx : EditContext, pname : String, isMatSetupProp : Bool) {
+	public function addOverrideProperty(ctx : hide.prefab.EditContext, pname : String, isMatSetupProp : Bool) {
 		// Remove previous value of this props name in overrides
 		var idx = 0;
 		while (idx < overrides.length) {
@@ -573,7 +668,7 @@ class Material extends Prefab {
 		updateHighlightOverrides(ctx);
 	}
 
-	public function updateHighlightOverrides(ctx : EditContext) {
+	public function updateHighlightOverrides(ctx : hide.prefab.EditContext) {
 		ctx.properties.element.find(".override").removeClass("override");
 		ctx.properties.element.find(".remove-override-btn").remove();
 
@@ -592,11 +687,11 @@ class Material extends Prefab {
 			parentDiv.addClass("override");
 
 			var label = parentDiv.children().first();
-			var removeOverrideBtn = new Element('<i title="Remove override" class="remove-override-btn icon ico ico-remove"></i>').insertBefore(label);
+			var removeOverrideBtn = new hide.Element('<i title="Remove override" class="remove-override-btn icon ico ico-remove"></i>').insertBefore(label);
 			removeOverrideBtn.css({ "cursor":"pointer" });
 			removeOverrideBtn.on("click", function(_){
 				overrides.remove(o);
-				updateInstance(ctx.scene.editor.getContext(this));
+				updateInstance();
 				ctx.rebuildProperties();
 			});
 		}
@@ -617,8 +712,43 @@ class Material extends Prefab {
 				var refPath = refMatLib.substr(0,refMatLib.lastIndexOf("/"));
 				refMatLib = f(refPath) + refMatLib.substr(refMatLib.lastIndexOf("/"));
 			},
-			allowChildren: function(t) return !Library.isOfType(t, Material),
+			allowChildren: function(t) return !Prefab.isOfType(t, Material),
 		};
+	}
+
+	override public function setSelected(b : Bool ) : Bool {
+		if (previewSphere == null)
+			return true;
+
+		var materials = previewSphere.getMaterials();
+
+		if( !b ) {
+			for( m in materials ) {
+				//m.mainPass.stencil = null;
+				m.removePass(m.getPass("highlight"));
+				m.removePass(m.getPass("highlightBack"));
+			}
+			return true;
+		}
+
+		var shader = new h3d.shader.FixedColor(0xffffff);
+		var shader2 = new h3d.shader.FixedColor(0xff8000);
+		for( m in materials ) {
+			if( m.name != null && StringTools.startsWith(m.name,"$UI.") )
+				continue;
+			var p = m.allocPass("highlight");
+			p.culling = None;
+			p.depthWrite = false;
+			p.depthTest = LessEqual;
+			p.addShader(shader);
+			var p = m.allocPass("highlightBack");
+			p.culling = None;
+			p.depthWrite = false;
+			p.depthTest = Always;
+			p.addShader(shader2);
+		}
+
+		return true;
 	}
 	#end
 
@@ -630,5 +760,5 @@ class Material extends Prefab {
 		return false;
 	}
 
-	static var _ = Library.register("material", Material);
+	static var _ = Prefab.register("material", Material);
 }

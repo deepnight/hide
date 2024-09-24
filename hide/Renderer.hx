@@ -63,27 +63,31 @@ class Renderer extends h3d.scene.fwd.Renderer {
 		renderPass(defaultPass, get("default"), frontToBack);
 		renderPass(defaultPass, get("alpha"), backToFront);
 		renderPass(defaultPass, get("additive") );
-		renderPass(defaultPass, get("debuggeom"), backToFront);
-		renderPass(defaultPass, get("debuggeom_alpha"), backToFront);
+		if(showEditorGuides) {
+			renderPass(defaultPass, get("debuggeom"), backToFront);
+			renderPass(defaultPass, get("debuggeom_alpha"), backToFront);
+		}
 		renderPass(defaultPass, get("overlay"), backToFront );
 		renderPass(defaultPass, get("ui"), backToFront);
 
-
-		var outlineTex = allocTarget("outlineBlur", false);
-		{
-			var outlineSrcTex = allocTarget("outline", true);
-			setTarget(outlineSrcTex);
-			clear(0);
-			draw("highlightBack");
-			draw("highlight");
-			resetTarget();
-			outlineBlur.apply(ctx, outlineSrcTex, outlineTex);
+		if (showEditorOutlines) {
+			{
+				var outlineTex = allocTarget("outlineBlur", false);
+				var outlineSrcTex = allocTarget("outline", true);
+				setTarget(outlineSrcTex);
+				clear(0);
+				draw("highlightBack");
+				draw("highlight");
+				resetTarget();
+				outlineBlur.apply(ctx, outlineSrcTex, outlineTex);
+				composite.shader.outline = outlineTex;
+			}
 		}
-
 		resetTarget();
 		composite.shader.texture = output;
-		composite.shader.outline = outlineTex;
 		composite.render();
+
+
 	}
 }
 
@@ -94,7 +98,14 @@ class PbrSetup extends h3d.mat.PbrMaterialSetup {
 	function getEnvMap() {
 		var ide = hide.Ide.inst;
 		var scene = hide.comp.Scene.getCurrent();
-		var path = ide.getPath(scene.config.get("scene.environment"));
+		var path : String = "";
+		if (scene != null) {
+			path = ide.getPath(scene.config.get("scene.environment"));
+		}
+		else {
+			var scene2 = hide.comp.Scene.getCurrent();
+			path = ide.getPath(scene2.config.get("scene.environment"));
+		}
 		var data = sys.io.File.getBytes(path);
 		var pix = hxd.res.Any.fromBytes(path, data).toImage().getPixels();
 		var t = h3d.mat.Texture.fromPixels(pix, h3d.mat.Texture.nativeFormat); // sync
@@ -135,8 +146,6 @@ class ScreenOutline extends h3d.shader.ScreenShader {
 
 class PbrRenderer extends h3d.scene.pbr.Renderer {
 
-	var outline = new h3d.pass.ScreenFx(new ScreenOutline());
-	var outlineBlur = new h3d.pass.Blur(4);
 
 	public function new(env) {
 		super(env);
@@ -159,21 +168,6 @@ class PbrRenderer extends h3d.scene.pbr.Renderer {
 
 	override function end() {
 		switch( currentStep ) {
-		case MainDraw:
-		case BeforeTonemapping:
-			var outlineTex = allocTarget("outline", true);
-			ctx.engine.pushTarget(outlineTex);
-			clear(0);
-			draw("highlightBack");
-			draw("highlight");
-			ctx.engine.popTarget();
-			var outlineBlurTex = allocTarget("outlineBlur", false);
-			outlineBlur.apply(ctx, outlineTex, outlineBlurTex);
-			outline.shader.texture = outlineBlurTex;
-		case AfterTonemapping:
-			outline.render();
-			renderPass(defaultPass, get("debuggeom"), backToFront);
-			renderPass(defaultPass, get("debuggeom_alpha"), backToFront);
 		case Overlay:
 			renderPass(defaultPass, get("ui"), backToFront);
 		default:

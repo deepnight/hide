@@ -47,9 +47,8 @@ class ColorBox extends Component {
 
 	public function new(?parent : Element, ?root : Element, inIsPickerEnabled:Bool, canEditAlpha:Bool = false, ?fieldName : String) {
 		var e = new Element("<div>").addClass("color-box").width("32px").height("24px").addClass("checkerboard-bg");
-
-		if (fieldName != null)
-			e.attr( { "field":fieldName});
+		if (root != null)
+			hide.comp.JsTools.copyAttributes(e, root);
 
 		if (root != null) root.replaceWith(e) else root = e;
 		super(parent, e);
@@ -58,7 +57,7 @@ class ColorBox extends Component {
 
 		element.click(function(e) {
 			if (picker == null && isPickerEnabled) {
-				picker = new ColorPicker(canEditAlpha, null, this.element);
+				picker = new ColorPicker(canEditAlpha, this.element);
 				picker.value = workValue;
 				picker.onChange = function(isDragging) {
 					workValue = picker.value;
@@ -73,7 +72,7 @@ class ColorBox extends Component {
 
 				onPickerOpen();
 			} else if (picker != null) {
-				picker.close();
+				//picker.close();
 			}
 		});
 
@@ -170,20 +169,20 @@ class ColorPicker extends Popup {
 
 	}
 
-	public function new( ?canEditAlpha : Bool = false, ?parent : Element, ?root : Element ) {
-		if( root == null ) root = new Element("<div>").addClass("input-color");
-		super(parent,root);
+	public function new( ?canEditAlpha : Bool = false, ?parent : Element) {
+		//if( root == null ) root = new Element("<div>").addClass("input-color");
+		super(parent);
 		this.canEditAlpha = canEditAlpha;
 
 
-		popup.addClass("color-picker");
+		element.addClass("color-picker");
 
 		valueToARGB = ColorSpace.HSVtoiRGB;
 		ARGBToValue = ColorSpace.iRGBtoHSV;
 
 		initSliders();
 
-		new Element("<hr>").appendTo(popup);
+		new Element("<hr>").appendTo(element);
 
 		initInfobar();
 
@@ -193,7 +192,7 @@ class ColorPicker extends Popup {
 
 	function initInfobar() {
 		var infoBar = new Element("<div>").addClass("info-bar");
-		popup.append(infoBar);
+		element.append(infoBar);
 
 		preview = new ColorBox(infoBar, null, false, canEditAlpha);
 		preview.element.width(64);
@@ -254,7 +253,7 @@ class ColorPicker extends Popup {
 
 	function initSliders() {
 		{
-			primarySliders = new SliderGroup(popup, canEditAlpha, ColorSpace.colorModes[1]);
+			primarySliders = new SliderGroup(element, canEditAlpha, ColorSpace.colorModes[1]);
 
 			primarySliders.onChange = function(isDragging : Bool) {
 				workValue = primarySliders.value;
@@ -325,10 +324,10 @@ class ColorPicker extends Popup {
 			}
 		}
 
-		new Element("<hr>").appendTo(popup);
+		new Element("<hr>").appendTo(element);
 
 		{
-			secondarySliders = new SliderGroup(popup, canEditAlpha, ColorSpace.colorModes[0]);
+			secondarySliders = new SliderGroup(element, canEditAlpha, ColorSpace.colorModes[0]);
 
 			secondarySliders.onChange = function(isDragging : Bool) {
 				workValue = secondarySliders.value;
@@ -449,6 +448,8 @@ class ColorPicker extends Popup {
 		if (color == null)
 			return null;
 
+		color = color & 0xFFFFFFFF;
+
 		var containsAlpha = false;
 		switch (str.length) {
 			case 2: // Assume color is shade of gray
@@ -471,7 +472,6 @@ class ColorPicker extends Popup {
 		else if (containsAlpha && !canEditAlpha) {
 			color = (color & 0xFFFFFF) ;
 		}
-
 		return color;
 	}
 
@@ -696,8 +696,7 @@ class SliderGroup extends Component {
 	function get_value() {
 		var color = new Color();
 		colorMode.valueToARGB(workValue, color);
-		return if (!canEditAlpha) (color.r << 16) + (color.g << 8) + color.b
-		else (color.r << 16) + (color.g << 8) + (color.b << 0) + (color.a << 24);
+		return color.toInt(canEditAlpha);
 	};
 
 	public function addSlider(slider : ColorSlider) : ColorSlider {

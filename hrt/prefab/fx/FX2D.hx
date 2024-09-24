@@ -3,6 +3,7 @@ import hrt.prefab.Curve;
 import hrt.prefab.Prefab as PrefabElement;
 import hrt.prefab.fx.BaseFX.ObjectAnimation;
 import hrt.prefab.fx.BaseFX.ShaderAnimation;
+import hrt.prefab.fx.Event;
 
 @:allow(hrt.prefab.fx.FX2D)
 class FX2DAnimation extends h2d.Object {
@@ -18,7 +19,7 @@ class FX2DAnimation extends h2d.Object {
 
 	public var loop : Bool;
 	public var objects: Array<ObjectAnimation> = [];
-	public var shaderAnims : Array<ShaderAnimation> = [];
+	public var customAnims : Array<BaseFX.CustomAnimation> = [];
 	public var emitters : Array<hrt.prefab.l2d.Particle2D.Particles>;
 	public var events: Array<hrt.prefab.fx.Event.EventInstance>;
 
@@ -37,36 +38,34 @@ class FX2DAnimation extends h2d.Object {
 		random.init(seed);
 	}
 
-	function init(ctx: Context, def: FX2D) {
-		initEmitters(ctx, def);
+	function init(def: FX2D) {
+		initEmitters(def);
 		if (def.children.length == 1 && def.children[0].name == "FXRoot")
-			events = initEvents(def.children[0], ctx);
+			events = initEvents(def.children[0]);
 		else
-			events = initEvents(def, ctx);
+			events = initEvents(def);
 	}
 
-	function initEmitters(ctx: Context, elt: PrefabElement) {
+	function initEmitters(elt: PrefabElement) {
 		var em = Std.downcast(elt, hrt.prefab.l2d.Particle2D);
 		if(em != null)  {
-			for(emCtx in ctx.shared.getContexts(elt)) {
-				if(emCtx.local2d == null) continue;
+			if(em.local2d == null) return;
 				if(emitters == null) emitters = [];
-				var emobj : hrt.prefab.l2d.Particle2D.Particles = cast emCtx.local2d;
+			var emobj : hrt.prefab.l2d.Particle2D.Particles = cast em.local2d;
 				emitters.push(emobj);
 			}
-		}
 		else {
 			for(c in elt.children) {
-				initEmitters(ctx, c);
+				initEmitters(c);
 			}
 		}
 	}
 
-	function initEvents(elt: PrefabElement, ctx: Context) {
+	function initEvents(elt: PrefabElement) {
 		var childEvents = [for(c in elt.children) if(c.to(Event) != null) c.to(Event)];
 		var ret = null;
 		for(evt in childEvents) {
-			var eventObj = evt.prepare(ctx);
+			var eventObj = evt.prepare();
 			if(eventObj == null) continue;
 			if(ret == null) ret = [];
 			ret.push(eventObj);
@@ -129,9 +128,10 @@ class FX2DAnimation extends h2d.Object {
 			}
 		}
 
-		for(anim in shaderAnims) {
-			anim.setTime(time);
-		}
+		if(customAnims != null)
+			for(anim in customAnims)
+				anim.setTime(time);
+
 		if (emitters != null) {
 			for(em in emitters) {
 				if(em.visible)
@@ -151,41 +151,40 @@ class FX2DAnimation extends h2d.Object {
 		if( visible && playSpeed > 0 ) {
 			var curTime = localTime;
 			setTime(curTime);
+			super.sync(ctx);
 			localTime += ctx.elapsedTime * playSpeed;
 			if( duration > 0 && curTime < duration && localTime >= duration) {
 				localTime = duration;
 				if( onEnd != null )
 					onEnd();
 			}
-			super.sync(ctx);
 		}
 	}
 }
 
-class FX2D extends BaseFX {
+class FX2D extends Object2D implements BaseFX {
+
+	@:s public var duration : Float;
+	@:s public var startDelay : Float;
+	@:c public var scriptCode : String;
+	@:c public var cullingRadius : Float;
+	@:c public var markers : Array<{t: Float}> = [];
+
 
 	@:s var loop : Bool = false;
 	@:s var startLoop : Float = 0.0;
 
-	public function new() {
-		super();
-		type = "fx2d";
-	}
 
-	function getObjAnimations(ctx:Context, elt: PrefabElement, anims: Array<ObjectAnimation>) {
+	function getObjAnimations(elt: PrefabElement, anims: Array<ObjectAnimation>) {
 		for(c in elt.children) {
-			getObjAnimations(ctx, c, anims);
+			getObjAnimations(c, anims);
 		}
 
 		var obj2d = elt.to(hrt.prefab.Object2D);
-		if(obj2d == null)
+		if(obj2d == null || obj2d.local2d == null)
 			return;
 
 		// TODO: Support references?
-		var objCtx = ctx.shared.contexts.get(elt);
-		if(objCtx == null || objCtx.local2d == null)
-			return;
-
 		var anyFound = false;
 
 		function makeVal(name, def) : Value {
@@ -203,9 +202,9 @@ class FX2D extends BaseFX {
 			anyFound = true;
 
 			if(uniform && curves.length == 1 && curves[0].name == name)
-				return scale != 1.0 ? VCurveScale(curves[0], scale) : VCurve(curves[0]);
+				return scale != 1.0 ? VMult(curves[0].makeVal(), VConst(scale)) : curves[0].makeVal();
 
-			return Curve.getVectorValue(curves, defVal, scale, blendFactor);
+			return Curve.getVectorValue(curves, defVal, scale);
 		}
 
 		function makeColor(name: String) {
@@ -219,7 +218,7 @@ class FX2D extends BaseFX {
 
 		var anim : ObjectAnimation = {
 			elt2d: obj2d,
-			obj2d: objCtx.local2d,
+			obj2d: obj2d.local2d,
 			events: null,
 			position: makeVector("position", 0.0),
 			scale: makeVector("scale", 1.0, true),
@@ -228,8 +227,8 @@ class FX2D extends BaseFX {
 			visibility: makeVal("visibility", null),
 		};
 
-		for(evt in elt.getAll(Event)) {
-			var eventObj = evt.prepare(objCtx);
+		for(evt in elt.findAll(Event)) {
+			var eventObj = evt.prepare();
 			if(eventObj == null) continue;
 			if(anim.events == null) anim.events = [];
 			anim.events.push(eventObj);
@@ -243,41 +242,49 @@ class FX2D extends BaseFX {
 			anims.push(anim);
 	}
 
-	override function make( ctx : Context ) : Context {
-		ctx = ctx.clone(this);
-		var fxanim = createInstance(ctx.local2d);
+	override function make( ?sh:hrt.prefab.Prefab.ContextMake) : Prefab {
+		#if editor
+		return super.__makeInternal(sh);
+		#else
+		var fromRef = shared.parentPrefab != null;
+		var useFXRoot = #if editor fromRef #else true #end;
+		var root = hrt.prefab.fx.BaseFX.BaseFXTools.getFXRoot(this);
+		if( useFXRoot && root != null ) {
+			var childrenBackup = children;
+			children = [root];
+			var r = super.__makeInternal(sh);
+			children = childrenBackup;
+			return r;
+		} else
+			return super.__makeInternal(sh);
+		#end
+	}
+
+
+	override function postMakeInstance() {
+		var fxanim : FX2DAnimation = cast local2d;
+		fxanim.init(this);
+		getObjAnimations(this, fxanim.objects);
+		hrt.prefab.fx.BaseFX.BaseFXTools.getCustomAnimations(this, fxanim.customAnims);
+	}
+
+	override function makeObject(parent2d: h2d.Object) : h2d.Object {
+		var fxanim = createInstance(parent2d);
 		fxanim.duration = duration;
 		fxanim.loop = loop;
 		fxanim.startLoop = startLoop;
-		ctx.local2d = fxanim;
-		ctx.local3d = null;
 		fxanim.playSpeed = 1.0;
 
-		#if editor
-		super.make(ctx);
-		#else
-		var root = getFXRoot(ctx, this);
-		if( root != null ) {
-			for( c in root.children )
-				makeChild(ctx, c);
-		} else
-			super.make(ctx);
-		#end
-		fxanim.init(ctx, this);
-
-		getObjAnimations(ctx, this, fxanim.objects);
-		BaseFX.getShaderAnims(ctx, this, fxanim.shaderAnims);
-
-		return ctx;
+		return fxanim;
 	}
 
-	public function getTargetShader2D( ctx : Context, name : String ) {
-		return ctx.local2d;
+	public function getTargetShader2D(name : String ) {
+		return local2d;
 	}
 
-	override function updateInstance( ctx: Context, ?propName : String ) {
-		super.updateInstance(ctx, null);
-		var fxanim = Std.downcast(ctx.local2d, FX2DAnimation);
+	override function updateInstance(?propName : String ) {
+		super.updateInstance(propName);
+		var fxanim = Std.downcast(local2d, FX2DAnimation);
 		fxanim.duration = duration;
 		fxanim.loop = loop;
 	}
@@ -289,13 +296,13 @@ class FX2D extends BaseFX {
 	}
 
 	#if editor
-	override function refreshObjectAnims(ctx: Context) {
-		var fxanim = Std.downcast(ctx.local2d, FX2DAnimation);
+	public function refreshObjectAnims() {
+		var fxanim = Std.downcast(local2d, FX2DAnimation);
 		fxanim.objects = [];
-		getObjAnimations(ctx, this, fxanim.objects);
+		getObjAnimations(this, fxanim.objects);
 	}
 
-	override function edit( ctx : EditContext ) {
+	override function edit( ctx : hide.prefab.EditContext ) {
 		var props = new hide.Element('
 			<div class="group" name="FX2D Scene">
 				<dl>
@@ -309,10 +316,10 @@ class FX2D extends BaseFX {
 		});
 	}
 
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "cube", name : "FX2D", allowParent: _ -> false};
 	}
 	#end
 
-	static var _ = Library.register("fx2d", FX2D, "fx2d");
+	static var _ = Prefab.register("fx2d", FX2D, "fx2d");
 }

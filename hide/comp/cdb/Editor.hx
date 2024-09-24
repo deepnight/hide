@@ -53,7 +53,7 @@ typedef SearchFilter = {
 @:allow(hide.comp.cdb)
 class Editor extends Component {
 
-	static var COMPARISON_EXPR_CHARS = ["!=", ">=", "<=", "=", "<", ">"];
+	static var COMPARISON_EXPR_CHARS = ["!=", ">=", "<=", "==", "<", ">"];
 	var base : cdb.Database;
 	var currentSheet : cdb.Sheet;
 	var existsCache : Map<String,{ t : Float, r : Bool }> = new Map();
@@ -119,7 +119,7 @@ class Editor extends Component {
 			element.mousedown(onMouseDown);
 			keys = new hide.ui.Keys(element);
 		} else {
-			cdbTable.element.off("mousedown", onMouseDown);
+			cdbTable.element.off("mousedown" #if js, onMouseDown #end);
 			cdbTable.element.mousedown(onMouseDown);
 			keys = cdbTable.keys;
 		}
@@ -158,7 +158,9 @@ class Editor extends Component {
 			}
 		});
 		keys.register("cdb.gotoReference", () -> gotoReference(cursor.getCell()));
-		keys.register("cdb.globalSeek", () -> new GlobalSeek(cdbTable.element, cdbTable));
+		keys.register("cdb.globalSeek", () -> new GlobalSeek(cdbTable.element, cdbTable, Sheets, currentSheet));
+		keys.register("cdb.sheetSeekIds", () -> new GlobalSeek(cdbTable.element, cdbTable, LocalIds, currentSheet));
+		keys.register("cdb.globalSeekIds", () -> new GlobalSeek(cdbTable.element, cdbTable, GlobalIds, currentSheet));
 
 		base = sheet.base;
 		if( cursor == null )
@@ -171,7 +173,7 @@ class Editor extends Component {
 		refresh();
 	}
 
-	function onMouseDown( e : js.jquery.Event ) {
+	function onMouseDown( e : hide.Element.Event ) {
 		switch ( e.which ) {
 		case 4:
 			cursorJump(true);
@@ -183,7 +185,7 @@ class Editor extends Component {
 		return true;
 	}
 
-	function onKey( e : js.jquery.Event ) {
+	function onKey( e : hide.Element.Event ) {
 		if( e.altKey )
 			return false;
 		var isRepeat: Bool = untyped e.originalEvent.repeat;
@@ -270,16 +272,38 @@ class Editor extends Component {
 			return ~/[\u0300-\u036f]/g.map(t, (r) -> "");
 		}
 
-		var all = element.find("table.cdb-sheet > tbody > tr").not(".head");
+		var all = element.find("table.cdb-sheet > tbody > tr");
 		if( config.get("cdb.filterIgnoreSublist") )
-			all = element.find("> table.cdb-sheet > tbody > tr").not(".head");
-		var seps = all.filter(".separator");
-		var lines = all.not(".separator");
+			all = element.find("> table.cdb-sheet > tbody > tr");
+
 		all.removeClass("filtered");
 
+		if (searchExp)
+			all = all.not(".head").not(".list").not("props"); // remove potential opened list or properties
+
+		var seps = all.filter(".separator");
+		var lines = all.not(".separator");
+
 		var parser = new hscript.Parser();
+		parser.allowMetadata = true;
 		parser.allowTypes = true;
+		parser.allowJSON = true;
+
 		var interp = new hscript.Interp();
+
+		var sheetNames = new Map();
+		for( s in this.base.sheets )
+			sheetNames.set(Formulas.getTypeName(s), s);
+
+		function replaceRec( e : hscript.Expr ) {
+			switch( e.e ) {
+			case EField({ e : EIdent(s) }, name) if( sheetNames.exists(s) ):
+				if( sheetNames.get(s).idCol != null )
+					e.e = EConst(CString(name)); // replace for faster eval
+			default:
+				hscript.Tools.iter(e, replaceRec);
+			}
+		}
 
 		if( filters.length > 0 ) {
 			if (searchHidden) {
@@ -301,25 +325,34 @@ class Editor extends Component {
 
 				for (idx => l in currentSheet.lines) {
 					// Register variables for the current line
-					interp.variables.clear();
-					interp.variables.set("this", @:privateAccess formulas.remap(l, this.currentSheet));
+					@:privateAccess interp.resetVariables();
+					@:privateAccess interp.initOps();
+					interp.variables.set("Math", Math);
 
+					// Register variables of sheets cdb
+					var vars = @:privateAccess formulas.remap(l, this.currentSheet);
+					for (f in Reflect.fields(vars)) {
+						var v = Reflect.getProperty(vars, f);
+						interp.variables.set(f, v);
+					}
+
+					function addFilter() {
+						var lineEl = lines.eq(idx);
+						lineEl.addClass("filtered");
+
+						var nextTr = lineEl.next('tr');
+						if (nextTr.is(".props") || nextTr.is(".list"))
+							nextTr.addClass("filtered");
+					}
+
+					// Check if the current line is filtered or not
 					var filtered = true;
 					for (f in filters) {
 						var input = f.text;
+						var expr = try parser.parseString(input) catch( e : Dynamic ) { addFilter(); continue; }
+						replaceRec(expr);
 
-						// Not working for now, should check with expression variables
-						// instead of contains() in input string
-						// // Manage input variable without 'this.'
-						// input = StringTools.replace(input, "this.", "");
-						// for (v in Reflect.fields(interp.variables.get("this"))) {
-						// 	if (StringTools.contains(input, v)) {
-						// 		input = StringTools.replace(input, v, "this." + v);
-						// 	}
-						// }
-
-						var expr = try parser.parseString(input) catch( e : Dynamic ) continue;
-						var res = try interp.execute(expr) catch(e : Dynamic ) { trace(e); continue;} // Catch errors that can be thrown if search input text is not interpretabled
+						var res = try interp.execute(expr) catch( e : hscript.Expr.Error ) { addFilter(); continue; } // Catch errors that can be thrown if search input text is not interpretabled
 						if (res) {
 							filtered = false;
 							break;
@@ -327,7 +360,7 @@ class Editor extends Component {
 					}
 
 					if (filtered)
-						lines[idx].classList.add("filtered");
+						addFilter();
 				}
 			}
 			else {
@@ -491,6 +524,10 @@ class Editor extends Component {
 
 	function onPaste() {
 		var text = ide.getClipboard();
+
+		if (this.cursor.table == null)
+			return;
+
 		var columns = cursor.table.columns;
 		var sheet = cursor.table.sheet;
 		var realSheet = cursor.table.getRealSheet();
@@ -682,8 +719,8 @@ class Editor extends Component {
 				for( cid in 0...clipboard.schema.length ) {
 					var c1 = clipboard.schema[cid];
 					var c2 = columns[cid + posX];
-					var p = Editor.getColumnProps(c2);
 					if( c2 == null ) continue;
+					var p = Editor.getColumnProps(c2);
 
 					if( !cursor.table.canEditColumn(c2.name) || p.copyPasteImmutable)
 						continue;
@@ -715,6 +752,11 @@ class Editor extends Component {
 		var sel = cursor.getSelection();
 		if( sel == null )
 			return;
+
+		delete(sel.x1, sel.x2, sel.y1, sel.y2);
+	}
+
+	function delete(x1 : Int, x2 : Int, y1 : Int, y2 : Int) {
 		var hasChanges = false;
 		var sheet = cursor.table.sheet;
 
@@ -729,26 +771,30 @@ class Editor extends Component {
 				}
 			}
 		}
+
 		beginChanges();
 		if( cursor.x < 0 ) {
 			// delete lines
-			var y = sel.y2;
+			var y = y2;
 			if( !cursor.table.canInsert() ) {
 				endChanges();
 				return;
 			}
-			while( y >= sel.y1 ) {
+
+			while( y >= y1 ) {
 				var line = cursor.table.lines[y];
 				sheet.deleteLine(line.index);
 				hasChanges = true;
 				y--;
 			}
-			cursor.set(cursor.table, -1, sel.y1, null, false);
-		} else {
+
+			cursor.set(cursor.table, -1, y1, null, false);
+		}
+		else {
 			// delete cells
-			for( y in sel.y1...sel.y2+1 ) {
+			for( y in y1...y2+1 ) {
 				var line = cursor.table.lines[y];
-				for( x in sel.x1...sel.x2+1 ) {
+				for( x in x1...x2+1 ) {
 					var c = line.columns[x];
 					if( !line.cells[x].canEdit() )
 						continue;
@@ -761,6 +807,7 @@ class Editor extends Component {
 				}
 			}
 		}
+
 		endChanges();
 		if( hasChanges )
 			refreshAll();
@@ -904,7 +951,7 @@ class Editor extends Component {
 			var commands = [for (h in hooks) if (h.sheets.has(s)) h.cmd];
 			function runRec(i: Int) {
 				runningHooks = true;
-				ide.runCommand(commands[i], (e, stdout, stderr) -> {
+				ide.runCommand(commands[i], (e) -> {
 					if (e != null) {
 						ide.error('Hook error:\n$e');
 						hookEnd();
@@ -1019,9 +1066,10 @@ class Editor extends Component {
 	}
 
 	public static var inRefreshAll(default,null) : Bool;
-	public static function refreshAll( eraseUndo = false ) {
+	public static function refreshAll( eraseUndo = false, loadDataFiles = true) {
 		var editors : Array<Editor> = [for( e in new Element(".is-cdb-editor").elements() ) e.data("cdb")];
-		DataFiles.load();
+		if (loadDataFiles)
+			DataFiles.load();
 		inRefreshAll = true;
 		for( e in editors ) {
 			e.syncSheet(Ide.inst.database);
@@ -1060,7 +1108,11 @@ class Editor extends Component {
 		}
 		return id;
 	}
+
 	public function getReferences(id: String, withCodePaths = true, returnAtFirstRef = false, sheet: cdb.Sheet, ?codeFileCache: Array<{path: String, data:String}>, ?prefabFileCache: Array<{path: String, data:String}>) : Array<{str:String, ?goto:Void->Void}> {
+		#if hl
+		return [];
+		#else
 		if( id == null )
 			return [];
 
@@ -1147,9 +1199,9 @@ class Editor extends Component {
 				}
 
 				var spaces = "[ \\n\\t]";
-				var prevChars = ",\\(:=\\?\\[";
+				var prevChars = ",\\(:=\\?\\[|";
 				var postChars = ",\\):;\\?\\]&|";
-				var regexp = new EReg('((case$spaces+)|[$prevChars])$spaces*$id$spaces*[$postChars]',"");
+				var regexp = new EReg('((case$spaces+)|[$prevChars])$spaces*$id$spaces*[$postChars]*.*',"");
 				var regall = new EReg("\\b"+id+"\\b", "");
 				for (file in codeFileCache) {
 
@@ -1212,7 +1264,7 @@ class Editor extends Component {
 								continue;
 							}
 							var ext = f.split(".").pop();
-							if( @:privateAccess hrt.prefab.Library.registeredExtensions.exists(ext) ) {
+							if( @:privateAccess hrt.prefab.Prefab.extensionRegistry.exists(ext) ) {
 								prefabFileCache.push({path: fpath, data: sys.io.File.getContent(fpath)});
 							}
 						}
@@ -1312,6 +1364,7 @@ class Editor extends Component {
 			}
 		}
 		return message;
+		#end
 	}
 
 	public function findUnreferenced(col: cdb.Data.Column, table: Table) {
@@ -1467,7 +1520,7 @@ class Editor extends Component {
 				// If user input a comaprison character, switch to expression mode for
 				// the current filter
 				for (c in Editor.COMPARISON_EXPR_CHARS) {
-					if (StringTools.contains(e.getThis().val(), c) && !searchExp) {
+					if (StringTools.contains(Element.getVal(e.getThis()), c) && !searchExp) {
 						searchExp = true;
 						var searchTypeBtn = searchBox.find(".search-type");
 						searchTypeBtn.toggleClass("fa-superscript", searchExp);
@@ -1477,7 +1530,7 @@ class Editor extends Component {
 					}
 				}
 
-				filters[index].text = e.getThis().val();
+				filters[index].text = Element.getVal(e.getThis());
 				filters[index].isExpr = e.getThis().next().hasClass("fa-superscript");
 
 				// Slow table refresh protection
@@ -1574,10 +1627,12 @@ class Editor extends Component {
 				addSearchInput();
 			if( filters.length <= currentFilters.length ) {
 				var inputs = inputCont.find("input");
+				#if js
 				for( i in 0...inputs.length ) {
 					var input: js.html.InputElement = cast inputs[i];
 					input.value = currentFilters[i].text;
 				}
+				#end
 			}
 		}
 	}
@@ -1615,7 +1670,87 @@ class Editor extends Component {
 		return cats == null || props.categories == null || cats.filter(c -> props.categories.indexOf(c) >= 0).length > 0;
 	}
 
+	public function moveColumn(targetSheet: cdb.Sheet, origSheet: cdb.Sheet, col: cdb.Data.Column) : String {
+		beginChanges(true);
+		var err = targetSheet.addColumn(col);
+
+		function createSubCols(targetSheet: cdb.Sheet, origSheet: cdb.Sheet, column: cdb.Data.Column) : String {
+			// Check to see if the column contains other columns
+			var subSheetPath = origSheet.getPath() + "@" + column.name;
+			var subSheet = base.getSheet(subSheetPath);
+			var subTargetPath = targetSheet.getPath() + "@" + column.name;
+			var subTarget = base.getSheet(subTargetPath);
+			if (subSheet != null) {
+				if (subTarget == null)
+					return 'original sheet $subSheetPath contains columns but target sheet $subTargetPath does not exist';
+
+				for (c in subSheet.columns) {
+					var err = subTarget.addColumn(c);
+					if (err != null)
+						return err;
+					createSubCols(subTarget, subSheet, c);
+				}
+			}
+			return null;
+		}
+
+		if (err == null) {
+			var err = createSubCols(targetSheet, origSheet, col);
+			if (err == null) {
+				// Copy the data from the original column to the new one
+				var commonSheet = origSheet;
+				var commonPath = origSheet.getPath().split("@");
+				while(true) {
+					if (commonPath.length <= 0) {
+						throw "missing parent table that is not props";
+					}
+					commonSheet = base.getSheet(commonPath.join("@"));
+
+					if (!commonSheet.props.isProps)
+						break;
+					commonPath.pop();
+				}
+
+				var origPath = origSheet.getPath().split("@");
+				origPath.splice(0, commonPath.length);
+				origPath.push(col.name);
+				var targetPath = targetSheet.getPath().split("@");
+				targetPath.splice(0, commonPath.length);
+
+				var lines = commonSheet.getLines();
+				for (i => line in lines) {
+					// read value from origPath
+					var value : Dynamic = line;
+					for (p in origPath) {
+						value = Reflect.field(value, p);
+						if (value == null)
+							break;
+					}
+
+					if (value != null) {
+						// Get or insert intermediates props value along targetPath
+						var target : Dynamic = line;
+						for (p in targetPath) {
+							var newTarget = Reflect.field(target, p);
+							if (newTarget == null) {
+								newTarget = {};
+								Reflect.setField(target, p, newTarget);
+							}
+							target = newTarget;
+						}
+						Reflect.setField(target, col.name, value);
+					}
+				}
+
+				origSheet.deleteColumn(col.name);
+			}
+		}
+		endChanges();
+		return err;
+	}
+
 	public function newColumn( sheet : cdb.Sheet, ?index : Int, ?onDone : cdb.Data.Column -> Void, ?col ) {
+		#if js
 		var modal = new hide.comp.cdb.ModalColumnForm(this, sheet, col, element);
 		modal.setCallback(function() {
 			var c = modal.getColumn(col);
@@ -1623,8 +1758,58 @@ class Editor extends Component {
 				return;
 			beginChanges(true);
 			var err;
-			if( col != null )
+			if( col != null ) {
+				var newPath = c.name;
+				var back = newPath.split("/");
+				var finalPart = back.pop();
+				var path = finalPart.split(".");
+				c.name = path.pop();
 				err = base.updateColumn(sheet, col, c);
+				if (path.length > 0 || back.length > 0) {
+					function handleMoveTable() {
+						var cdbPath = sheet.getPath().split("@");
+						for(b in back) {
+							if (b != "..") {
+								return 'Invalid backwards move path "${back.join("/")}" (correct syntax : ../../columnName)';
+							}
+							if (cdbPath.length <= 0) {
+								return 'Backwards path "${back.join("/")}" goes outside of base sheet';
+							}
+							var subSheet = base.getSheet(cdbPath.join("@"));
+							if (!subSheet.props.isProps) {
+								return 'Target path "${cdbPath.join(".")}" goes inside or outside another sheet';
+							}
+							cdbPath.pop();
+						}
+
+						for (p in path) {
+							cdbPath.push(p);
+							var subSheet = base.getSheet(cdbPath.join("@"));
+							if (subSheet == null) {
+								return 'Target sheet "${cdbPath.join(".")}" does not exist';
+							}
+							if (!subSheet.props.isProps) {
+								return 'Target path "${cdbPath.join(".")}" goes inside or outside another sheet';
+							}
+						}
+
+						var finalPath = cdbPath.join("@");
+						var targetSheet = base.getSheet(finalPath);
+						if (targetSheet != null) {
+							if (ide.confirm('Move column to "$finalPath" ?')) {
+								return moveColumn(targetSheet, sheet, c);
+							}
+							return 'Move canceled';
+						}
+						else {
+							return 'Invalid move path "$newPath"';
+						}
+						return null;
+					}
+
+					err = handleMoveTable();
+				}
+			}
 			else
 				err = sheet.addColumn(c, index == null ? null : index + 1);
 			endChanges();
@@ -1645,6 +1830,7 @@ class Editor extends Component {
 					t.refresh();
 			modal.closeModal();
 		});
+		#end
 	}
 
 	public function editColumn( sheet : cdb.Sheet, col : cdb.Data.Column ) {
@@ -1656,7 +1842,7 @@ class Editor extends Component {
 			return;
 		if( table.displayMode == Properties ) {
 			var ins = table.element.find("select.insertField");
-			var options = [for( o in ins.find("option").elements() ) o.val()];
+			var options = [for( o in ins.find("option").elements() ) Element.getVal(o)];
 			ins.attr("size", options.length);
 			options.shift();
 			ins.focus();
@@ -1673,7 +1859,7 @@ class Editor extends Component {
 				case K.DOWN if( index < options.length - 1 ):
 					ins.val(options[++index]);
 				case K.ENTER:
-					@:privateAccess table.insertProperty(ins.val());
+					@:privateAccess table.insertProperty(Element.getVal(ins));
 				default:
 				}
 				e.stopPropagation();
@@ -2002,7 +2188,7 @@ class Editor extends Component {
 			moveSubmenu.push({
 				label : sep.title,
 				enabled : true,
-				click : isSelectedLine ? moveLines.bind(selection, delta) : moveLine.bind(usedLine, delta),
+				click : isSelectedLine ? moveLines.bind(selection, delta) : () -> moveLine(usedLine, delta),
 			});
 		}
 
@@ -2026,12 +2212,12 @@ class Editor extends Component {
 			{
 				label : "Move Up",
 				enabled:  (firstLine.index > 0 || sepIndex >= 0),
-				click : isSelectedLine ? moveLines.bind(selection, -1) : moveLine.bind(line, -1),
+				click : isSelectedLine ? moveLines.bind(selection, -1) : () -> moveLine(line, -1),
 			},
 			{
 				label : "Move Down",
 				enabled:  (lastLine.index < sheet.lines.length - 1),
-				click : isSelectedLine ? moveLines.bind(selection, 1) : moveLine.bind(line, 1),
+				click : isSelectedLine ? moveLines.bind(selection, 1) : () -> moveLine(line, 1),
 			},
 			{ label : "Move to Group", enabled : moveSubmenu.length > 0, menu : moveSubmenu },
 			{ label : "", isSeparator : true },
@@ -2046,19 +2232,8 @@ class Editor extends Component {
 				focus();
 			}, keys : config.get("key.duplicate") },
 			{ label : "Delete", click : function() {
-				var id = line.getId();
-				if( id != null && id.length > 0) {
-					var refs = getReferences(id, sheet);
-					if( refs.length > 0 ) {
-						var message = [for (r in refs) r.str].join("\n");
-						if( !ide.confirm('$id is referenced elswhere. Are you sure you want to delete?\n$message') )
-							return;
-					}
-				}
-				beginChanges();
-				sheet.deleteLine(line.index);
-				endChanges();
-				refreshAll();
+				var sel = cursor.getSelection();
+				delete(sel.x1, sel.x2, sel.y1, sel.y2);
 			} },
 			{ label : "Separator", enabled : !sheet.props.hide, checked : sepIndex >= 0, click : function() {
 				beginChanges();
@@ -2143,7 +2318,9 @@ class Editor extends Component {
 				return;
 			categories = [for(s in wstr.split(",")) { var t = StringTools.trim(s); if(t.length > 0) t; }];
 			setFunc(categories.length > 0 ? categories : null);
+			#if editor
 			ide.initMenu();
+			#end
 		}}];
 
 		for(name in getCategories(base)) {
@@ -2166,6 +2343,19 @@ class Editor extends Component {
 		return menu;
 	}
 
+	public function createDBSheet( ?index : Int ) {
+		var value = ide.ask("Sheet name");
+		if( value == "" || value == null ) return null;
+		var s = ide.database.createSheet(value, index);
+		if( s == null ) {
+			ide.error("Name already exists");
+			return null;
+		}
+		ide.saveDatabase();
+		refreshAll();
+		return s;
+	}
+
 	public function popupSheet( withMacro = true, ?sheet : cdb.Sheet, ?onChange : Void -> Void ) {
 		if( view != null )
 			return;
@@ -2176,7 +2366,7 @@ class Editor extends Component {
 		var content : Array<ContextMenu.ContextMenuItem> = [];
 		if (withMacro) {
 			content = content.concat([
-				{ label : "Add Sheet", click : function() { beginChanges(); var db = ide.createDBSheet(index+1); endChanges(); if( db != null ) onChange(); } },
+				{ label : "Add Sheet", click : function() { beginChanges(); var db = createDBSheet(index+1); endChanges(); if( db != null ) onChange(); } },
 				{ label : "Move Left", click : function() { beginChanges(); base.moveSheet(sheet,-1); endChanges(); onChange(); } },
 				{ label : "Move Right", click : function() { beginChanges(); base.moveSheet(sheet,1); endChanges(); onChange(); } },
 				{ label : "Rename", click : function() {
@@ -2268,8 +2458,10 @@ class Editor extends Component {
 	}
 
 	public function focus() {
+		#if js
 		if( element.is(":focus") ) return;
 		(element[0] : Dynamic).focus({ preventScroll : true });
+		#end
 	}
 
 	static public function getSheetProps( s : cdb.Sheet ) {

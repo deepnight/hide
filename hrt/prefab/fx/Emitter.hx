@@ -4,11 +4,23 @@ import hrt.impl.Gradient;
 import hrt.prefab.l3d.Polygon;
 import hrt.prefab.Curve;
 import hrt.prefab.fx.BaseFX.ShaderAnimation;
+import hrt.prefab.fx.Value;
+import hrt.prefab.fx.Evaluator;
+
+#if editor
+import hide.prefab.HideProps;
+#end
+
 using Lambda;
 
 enum SimulationSpace {
 	Local;
 	World;
+}
+
+enum ParticleScaling {
+	Parent;
+	None;
 }
 
 enum AlignMode {
@@ -61,10 +73,12 @@ class InstanceDef {
 	var startSpeed: Value;
 	var startWorldSpeed: Value;
 	var orbitSpeed: Value;
+	var orbitSpeedOverTime: Value;
 	var acceleration: Value;
 	var worldAcceleration: Value;
 	var localOffset: Value;
 	var scale: Value;
+	var scaleOverTime: Value;
 	var stretch: Value;
 	var stretchVelocity: Value;
 	var rotation: Value;
@@ -73,12 +87,11 @@ class InstanceDef {
 	public function new() { }
 }
 
-typedef ShaderAnims = Array<ShaderAnimation>;
 typedef PartArray = #if (hl_ver >= version("1.14.0")) hl.CArray<ParticleInstance> #else Array<ParticleInstance> #end;
 typedef Single = #if (hl_ver >= version("1.13.0")) hl.F32 #else Float #end;
 
 @:publicFields @:struct
-private class ParticleInstance {
+class ParticleInstance {
 	var prev : ParticleInstance;
 	var next : ParticleInstance;
 
@@ -227,16 +240,28 @@ private class ParticleInstance {
 		var absPos = tmpMat;
 		var localMat = tmpMat2;
 
+		var sx = scaleX;
+		var sy = scaleY;
+		var sz = scaleZ;
+
+		if (emitter.particleScaling == None && emitter.simulationSpace == Local) {
+			var invScale = inline emitter.parent.getAbsPos().getScale();
+			sx = sx/invScale.x;
+			sy = sy/invScale.y;
+			sz = sz/invScale.z;
+		}
+
+
 		inline qRot.toMatrix(absPos);
-		absPos._11 *= scaleX;
-		absPos._12 *= scaleX;
-		absPos._13 *= scaleX;
-		absPos._21 *= scaleY;
-		absPos._22 *= scaleY;
-		absPos._23 *= scaleY;
-		absPos._31 *= scaleZ;
-		absPos._32 *= scaleZ;
-		absPos._33 *= scaleZ;
+		absPos._11 *= sx;
+		absPos._12 *= sx;
+		absPos._13 *= sx;
+		absPos._21 *= sy;
+		absPos._22 *= sy;
+		absPos._23 *= sy;
+		absPos._31 *= sz;
+		absPos._32 *= sz;
+		absPos._33 *= sz;
 		absPos._41 = x;
 		absPos._42 = y;
 		absPos._43 = z;
@@ -250,7 +275,9 @@ private class ParticleInstance {
 		var def = emitter.instDef;
 		var scaleVec = evaluator.getVector(idx, def.stretch, t, tmpScale);
 		scaleVec.scale3(evaluator.getFloat(idx, def.scale, t));
+		scaleVec.scale3(evaluator.getFloat(idx, def.scaleOverTime, emitter.curTime));
 		localMat.initScale(scaleVec.x, scaleVec.y, scaleVec.z);
+
 
 		// ROTATION
 		if(def.rotation != VZero) {
@@ -379,7 +406,12 @@ private class ParticleInstance {
 
 		if(def.orbitSpeed != VZero) {
 			evaluator.getVector(idx, def.orbitSpeed, t, tmpLocalSpeed);
+
+			var factorOverTime = evaluator.getFloat(idx, def.orbitSpeedOverTime, emitter.curTime);
+			tmpLocalSpeed.scale3(factorOverTime);
+
 			tmpMat.initRotation(tmpLocalSpeed.x * dt, tmpLocalSpeed.y * dt, tmpLocalSpeed.z * dt);
+
 			// Rotate in emitter space and convert back to world space
 			var parentAbsPos = emitter.parentTransform;
 			var prevPos = getPosition();
@@ -410,6 +442,7 @@ private class ParticleInstance {
 	}
 }
 
+@:access(hrt.prefab.Prefab)
 @:allow(hrt.prefab.fx.ParticleInstance)
 @:allow(hrt.prefab.fx.Emitter)
 class EmitterObject extends h3d.scene.Object {
@@ -420,7 +453,7 @@ class EmitterObject extends h3d.scene.Object {
 	public var particlesCount : Int;
 	public var listHead : ParticleInstance;
 	public var batch : h3d.scene.MeshBatch;
-	public var shaderAnims : ShaderAnims;
+	public var customAnims : Array<BaseFX.CustomAnimation>;
 
 	public var isSubEmitter : Bool = false;
 	public var relativeScenePosition : Bool = false;
@@ -449,9 +482,11 @@ class EmitterObject extends h3d.scene.Object {
 	public var lifeTimeRand = 0.0;
 	public var speedFactor = 1.0;
 	public var warmUpTime = 0.0;
+	public var delay = 0.0;
 	// EMIT PARAMS
 	public var emitOrientation : Orientation = Forward;
 	public var simulationSpace : SimulationSpace = Local;
+	public var particleScaling : ParticleScaling = Parent;
 	public var emitType : EmitType = Infinity;
 	public var burstCount : Int = 1;
 	public var burstParticleCount : Int = 5;
@@ -462,9 +497,9 @@ class EmitterObject extends h3d.scene.Object {
 	public var emitRateMax : Value;
 	public var emitRateChangeDelay : Float = 1.0;
 	public var emitRateChangeDelayStart : Float = 0.0;
-	public var emitRateCurrent : Null<Float>;
-	public var emitRatePrevious : Null<Float>;
-	public var emitRateTarget : Null<Float>;
+	public var emitRateCurrent : Float = Math.NaN;
+	public var emitRatePrevious : Float = Math.NaN;
+	public var emitRateTarget : Float = Math.NaN;
 	public var emitScale : Float = 1.0;
 	public var maxCount = 20;
 	public var enableSort = true;
@@ -481,6 +516,7 @@ class EmitterObject extends h3d.scene.Object {
 	public var frameDivisionY : Int = 1;
 	public var animationSpeed : Float = 1;
 	public var animationLoop : Bool = true;
+	public var animationUseSourceUVs : Bool = true;
 	public var animationBlendBetweenFrames : Bool = true;
 
 	// ALIGNMENT
@@ -507,7 +543,6 @@ class EmitterObject extends h3d.scene.Object {
 
 	var random: hxd.Rand;
 	var randomSeed = 0;
-	var context : hrt.prefab.Context;
 	var emitCount = 0;
 	var emitTarget = 0.0;
 	var curTime = 0.0;
@@ -529,15 +564,11 @@ class EmitterObject extends h3d.scene.Object {
 		random = new hxd.Rand(randomSeed);
 	}
 
-	function makeShaderInstance(prefab: hrt.prefab.Shader, ctx:Context):Context {
-		ctx = ctx.clone(prefab);
-		var shader = prefab.makeShader(ctx);
+	function makeShaderInstance(prefab: hrt.prefab.Shader) {
+		var shader = prefab.makeShader();
 		if( shader == null )
-			return ctx;
-		ctx.custom = shader;
-		prefab.updateInstance(ctx);
-		ctx.local3d = null;  // prevent ContextShared.getSelfObject from incorrectly reporting object
-		return ctx;
+			return;
+		prefab.updateInstance();
 	}
 
 	function init(randSlots: Int, prefab: Emitter) {
@@ -555,11 +586,18 @@ class EmitterObject extends h3d.scene.Object {
 			if(baseEmitMat.isIdentityEpsilon(0.01))
 				baseEmitMat = null;
 
-			var template = particleTemplate.makeInstance(context);
-			var mesh = Std.downcast(template.local3d, h3d.scene.Mesh);
+			var empty3d = new h3d.scene.Object();
+			var clone = particleTemplate.clone(new hrt.prefab.ContextShared(empty3d));
+			#if editor
+			clone.setEditor(prefab.shared.editor, prefab.shared.scene);
+			#end
+			@:privateAccess clone.makeInstance();
+			var loc3d = Object3D.getLocal3d(clone);
+
+			var mesh = Std.downcast(loc3d, h3d.scene.Mesh);
 			if( mesh == null ) {
-				for( i in 0...template.local3d.numChildren ) {
-					mesh = Std.downcast(template.local3d.getChildAt(i), h3d.scene.Mesh);
+				for( i in 0...loc3d.numChildren ) {
+					mesh = Std.downcast(loc3d.getChildAt(i), h3d.scene.Mesh);
 					if( mesh != null ) {
 						break;
 					}
@@ -572,9 +610,7 @@ class EmitterObject extends h3d.scene.Object {
 				mesh.remove();
 			}
 
-			template.shared.contexts.remove(particleTemplate);
-			template.local3d.remove();
-			template.local3d = null;
+			empty3d.remove();
 		}
 
 		if (meshPrimitive == null ) {
@@ -592,30 +628,26 @@ class EmitterObject extends h3d.scene.Object {
 			batch.name = "emitter";
 			batch.calcBounds = false;
 
-			var batchContext = context.clone(null);
-			batchContext.local3d = batch;
 			// Setup mats.
 			// Should we do this manually here or make a recursive makeInstance on the template?
-			var materials = emitterPrefab.getAll(hrt.prefab.Material);
+			var materials = emitterPrefab.findAll(hrt.prefab.Material);
 			for(mat in materials) {
 
 				// Remove materials that are not directly parented to this emitter
 				var p = mat.parent;
-				while (p != null && Std.downcast(p, Emitter) == null) {
+				while (p != null && Std.downcast(p, Emitter) == null)
 					p = p.parent;
-				}
 
 				if (this.emitterPrefab == p) {
 					if(mat.enabled) {
-						var ctx = mat.makeInstance(batchContext);
-						ctx.local3d = null;
+						@:privateAccess mat.makeInstance();
 					}
 				}
 			}
 
 			// Setup shaders
-			shaderAnims = [];
-			var shaders = emitterPrefab.getAll(hrt.prefab.Shader);
+			customAnims = [];
+			var shaders = emitterPrefab.findAll(hrt.prefab.Shader);
 			for( shader in shaders ) {
 				// Remove shaders that are not directly parented to this emitter
 				var p = shader.parent;
@@ -624,13 +656,10 @@ class EmitterObject extends h3d.scene.Object {
 				}
 				if (this.emitterPrefab == p) {
 					if( !shader.enabled ) continue;
-					var shCtx = makeShaderInstance(shader, batchContext);
-					if( shCtx == null ) continue;
-
-					shCtx.local3d = null; // Prevent shader.iterMaterials from adding our objet to the list incorectly
-
-					hrt.prefab.fx.BaseFX.getShaderAnims(shCtx, shader, shaderAnims, batch);
+					makeShaderInstance(shader);
+					hrt.prefab.fx.BaseFX.BaseFXTools.getCustomAnimations(shader, customAnims, batch);
 				}
+
 			}
 
 			// Animated textures animations
@@ -638,6 +667,7 @@ class EmitterObject extends h3d.scene.Object {
 			if( frameCount > 1 && spriteSheet != null ) {
 				var tex = hxd.res.Loader.currentInstance.load(spriteSheet).toTexture();
 				animatedTextureShader = new h3d.shader.AnimatedTexture(tex, frameDivisionX, frameDivisionY, frameCount, frameCount * animationSpeed / lifeTime);
+				animatedTextureShader.useSourceUVs = animationUseSourceUVs;
 				animatedTextureShader.startTime = startTime;
 				animatedTextureShader.loop = animationLoop;
 				animatedTextureShader.blendBetweenFrames = animationBlendBetweenFrames;
@@ -660,6 +690,7 @@ class EmitterObject extends h3d.scene.Object {
 		randomValues = [for(i in 0...(maxCount * randSlots)) 0];
 		evaluator = new Evaluator(randomValues, randSlots);
 		reset();
+
 	}
 
 	override function onRemove() {
@@ -790,7 +821,6 @@ class EmitterObject extends h3d.scene.Object {
 		return idx;
 	}
 
-	var tmpCtx : hrt.prefab.Context;
 	static var tmpQuat = new h3d.Quat();
 	static var tmpEmitterQuat = new h3d.Quat();
 	static var tmpOffset = new h3d.Vector();
@@ -813,13 +843,8 @@ class EmitterObject extends h3d.scene.Object {
 			var scene = relativeScenePosition ? getScene() : null;
 
 			if (trailsTemplate != null && trails == null) {
-				if( tmpCtx == null ) {
-					tmpCtx = new hrt.prefab.Context();
-					tmpCtx.shared = context.shared;
-				}
-				tmpCtx.custom = {numTrails: maxCount};
-				tmpCtx.local3d = this;
-				trails = cast trailsTemplate.make(tmpCtx).local3d;
+				var made = trailsTemplate.make(this);
+				trails = cast made.local3d;
 				trails.autoTrackPosition = false;
 			}
 
@@ -929,7 +954,13 @@ class EmitterObject extends h3d.scene.Object {
 						part.qRot.loadQuat(tmpQuat);
 						tmpQuat.toMatrix(tmpMat2);
 						part.emitOrientation.load(tmpMat2);
-						part.setScale(worldScale.x, worldScale.y, worldScale.z);
+
+						if (particleScaling == None) {
+							var invScale = inline parent.getAbsPos().getScale();
+							part.setScale(worldScale.x/invScale.x, worldScale.y/invScale.y, worldScale.z/invScale.z);
+						} else {
+							part.setScale(worldScale.x, worldScale.y, worldScale.z);
+						}
 				}
 				var frameCount = frameCount == 0 ? frameDivisionX * frameDivisionY : frameCount;
 				if(animationLoop)
@@ -938,11 +969,11 @@ class EmitterObject extends h3d.scene.Object {
 			}
 		}
 
-		context.local3d = this;
 		emitCount += count;
 	}
 
-	/** Called every time a particle is emitted. `offset` and `orient` can be modified (local space) **/
+	/** Called every time a particle is emitted. `offset` and `orient`
+		 can be modified (local space) **/
 	public dynamic function onEmit(offset: h3d.Vector, orient : h3d.Quat) { }
 
 	// No-alloc version of h3d.Matrix.getEulerAngles()
@@ -1012,14 +1043,14 @@ class EmitterObject extends h3d.scene.Object {
 					var min = evaluator.getFloat(emitRateMin, curTime);
 					var max = evaluator.getFloat(emitRateMax, curTime);
 
-					var unInitiliazed = emitRateCurrent == Math.NaN || emitRateCurrent == null;
+					var unInitiliazed = Math.isNaN(emitRateCurrent);
 					var needNewValue = curTime - emitRateChangeDelayStart >= emitRateChangeDelay || curTime - emitRateChangeDelayStart < 0;
 					if (unInitiliazed || needNewValue) {
 						emitRateChangeDelayStart = curTime;
 						emitRatePrevious = emitRateTarget;
 						emitRateTarget = random.rand() * (max-min) + min;
 
-						if (emitRatePrevious == Math.NaN || emitRatePrevious == null)
+						if ( Math.isNaN(emitRatePrevious) )
 							emitRatePrevious = random.rand() * (max-min) + min;
 					}
 
@@ -1158,7 +1189,7 @@ class EmitterObject extends h3d.scene.Object {
 				return;
 			inline tmpMat.load(p.absPos.toMatrix());
 			batch.worldPosition = tmpMat;
-			for( anim in shaderAnims ) {
+			for( anim in customAnims ) {
 				var t = hxd.Math.clamp(p.life / p.lifeTime, 0.0, 1.0);
 				anim.setTime(t);
 			}
@@ -1212,17 +1243,13 @@ class EmitterObject extends h3d.scene.Object {
 			var p = particles[i];
 			if(p.life > p.lifeTime) {
 				if (p.trail == null || p.trail.generation != p.trailGeneration) {
-					i = disposeInstance(i);
 					// SUB EMITTER
 					if( subEmitterTemplates != null ) {
-						if( tmpCtx == null ) {
-							tmpCtx = new hrt.prefab.Context();
-							tmpCtx.local3d = this.getScene();
-							tmpCtx.shared = context.shared;
-						}
-						tmpCtx.local3d = this.getScene();
-						for (sub in subEmitterTemplates) {
-							var emitter : EmitterObject = cast sub.makeInstance(tmpCtx).local3d;
+
+						for (subEmitterTemplate in subEmitterTemplates) {
+							var subEmitterInstance : Emitter = @:privateAccess subEmitterTemplate.make(this.getScene());
+						    var emitter : EmitterObject = cast subEmitterInstance.local3d;
+							p.updateAbsPos(this);
 							var pos = p.absPos.getPosition();
 							emitter.setPosition(pos.x, pos.y, pos.z);
 							emitter.isSubEmitter = true;
@@ -1232,6 +1259,8 @@ class EmitterObject extends h3d.scene.Object {
 							subEmitters.push(emitter);
 						}
 					}
+
+					i = disposeInstance(i);
 				} else {
 					prev = p;
 					++i;
@@ -1251,7 +1280,11 @@ class EmitterObject extends h3d.scene.Object {
 				++i;
 
 				if (trails != null) {
-					trails.addPoint(p.trail, p.absPos._41, p.absPos._42, p.absPos._43, ECamera, 1.0);
+					trails.updateTrail(p.trail, dt, p.absPos._41, p.absPos._42, p.absPos._43);
+					if ( @:privateAccess trails.cooldown < 0 ) {
+						@:privateAccess trails.cooldown = 1 / hrt.prefab.l3d.Trails.TrailObj.maxFramerate;
+						trails.addPoint(p.trail, p.absPos._41, p.absPos._42, p.absPos._43);
+					}
 				}
 			}
 		}
@@ -1298,6 +1331,11 @@ class EmitterObject extends h3d.scene.Object {
 			updateMeshBatch();  // Make sure mesh batch is reset even when no tick is called()
 		}
 
+		var abs = this.getAbsPos();
+		baseEmitterShader.emitPosition.set(abs.tx, abs.ty, abs.tz);
+
+		time = Math.max(0, time - delay * speedFactor);
+
 		var catchupTime = time - curTime;
 
 		#if !editor  // Limit catchup time to avoid spikes when showing long running FX
@@ -1339,8 +1377,8 @@ class EmitterObject extends h3d.scene.Object {
 
 class Emitter extends Object3D {
 
-	public function new(?parent) {
-		super(parent);
+	public function new(parent, shared: ContextShared) {
+		super(parent, shared);
 		props = { };
 		for(param in emitterParams) {
 			if(param.def != null)
@@ -1354,10 +1392,12 @@ class Emitter extends Object3D {
 		{ name: "lifeTimeRand", t: PFloat(0, 1), def: 0.0, groupName : "Properties" },
 		{ name: "speedFactor", disp: "Speed Factor", t: PFloat(0, 1), def: 1.0, groupName : "Properties" },
 		{ name: "warmUpTime", disp: "Warm Up", t: PFloat(0, 1), def: 0.0, groupName : "Properties" },
+		{ name: "delay", disp: "Delay", t: PFloat(0, 10), def: 0.0, groupName : "Properties" },
 		{ name: "seedGroup", t: PInt(0, 100), def: 0, groupName : "Properties", disp: "Seed"},
 		{ name: "alignMode", t: PEnum(AlignMode), def: AlignMode.None, disp: "Mode", groupName : "Properties" },
 		{ name: "alignLockAxis", t: PEnum(AlignLockAxis), def: AlignLockAxis.ScreenZ, disp: "Lock Axis", groupName : "Properties" },
 		{ name: "simulationSpace", t: PEnum(SimulationSpace), def: SimulationSpace.Local, disp: "Simulation Space", groupName : "Properties" },
+		{ name: "particleScaling", t: PEnum(ParticleScaling), def: ParticleScaling.Parent, disp: "Scaling", groupName : "Properties" },
 		{ name: "enableSort", t: PBool, def: true, disp: "Enable Sort", groupName : "Properties"},
 
 		// EMIT PARAMS
@@ -1383,7 +1423,7 @@ class Emitter extends Object3D {
 		{ name: "useRandomGradient", t: PBool, def: false, disp: "Random Gradient", groupName : "Color" },
 		{ name: "randomColor1", t: PVec(4), disp: "Color 1", def : [0,0,0,1], groupName : "Color" },
 		{ name: "randomColor2", t: PVec(4), disp: "Color 2", def : [1,1,1,1], groupName : "Color" },
-		{ name: "randomGradient", t:PGradient, disp: "Gradient", def: Gradient.getDefaultGradientData(), groupName : "Color" },
+		{ name: "randomGradient", t:PGradient, disp: "Gradient", def: null, groupName : "Color" },
 		// ANIMATION
 		{ name: "spriteSheet", t: PFile(["jpg","png"]), def: null, groupName : "Sprite Sheet Animation", disp: "Sheet" },
 		{ name: "frameCount", t: PInt(0), def: 0, groupName : "Sprite Sheet Animation", disp: "Frames" },
@@ -1391,6 +1431,7 @@ class Emitter extends Object3D {
 		{ name: "frameDivisionY", t: PInt(1), def: 1, groupName : "Sprite Sheet Animation", disp: "Divisions Y" },
 		{ name: "animationSpeed", t: PFloat(0, 2.0), def: 1.0, groupName : "Sprite Sheet Animation", disp: "Speed" },
 		{ name: "animationLoop", t: PBool, def: true, groupName : "Sprite Sheet Animation", disp: "Loop" },
+		{ name: "animationUseSourceUV", t: PBool, def: true, groupName : "Sprite Sheet Animation", disp: "Use Source UV" },
 		{ name: "animationBlendBetweenFrames", t: PBool, def: true, groupName : "Sprite Sheet Animation", disp: "Blend frames" },
 
 		// COLLISION
@@ -1406,29 +1447,35 @@ class Emitter extends Object3D {
 		{ name: "instStartSpeed",      		t: PVec(3, -10, 10),  def: [0.,0.,0.], disp: "Start Speed",groupName: "Particle Movement"},
 		{ name: "instStartWorldSpeed", 		t: PVec(3, -10, 10),  def: [0.,0.,0.], disp: "Start World Speed",groupName: "Particle Movement"},
 		{ name: "instOrbitSpeed", 			t: PVec(3, -10, 10),  def: [0.,0.,0.], disp: "Orbit Speed", groupName: "Particle Movement"},
+		{ name: "instOrbitSpeedOverTime", 			t: PFloat(0, 2.0),  def: 1., disp: "Orbit Speed over time", groupName: "Particle Movement"},
 		{ name: "instAcceleration",			t: PVec(3, -10, 10),  def: [0.,0.,0.], disp: "Acceleration", groupName: "Particle Movement"},
 		{ name: "instMaxVelocity",      			t: PFloat(0, 10.0),    def: 0.,         disp: "Max Velocity", groupName: "Limit Velocity"},
 		{ name: "instDampen",      			t: PFloat(0, 10.0),    def: 0.,         disp: "Dampen", groupName: "Limit Velocity"},
 		{ name: "instScale",      			t: PFloat(0, 2.0),    def: 1.,         disp: "Scale", groupName: "Particle Transform"},
+		{ name: "instScaleOverTime",      			t: PFloat(0, 2.0),    def: 1.,         disp: "Scale over time", groupName: "Particle Transform"},
 		{ name: "instStretch",    			t: PVec(3, 0.0, 2.0), def: [1.,1.,1.], disp: "Stretch", groupName: "Particle Transform"},
 		{ name: "instStretchVelocity",    	t: PFloat(0.0, 2.0), def: 0.0, disp: "Stretch Vel.", groupName: "Particle Transform"},
 		{ name: "instRotation",   			t: PVec(3, 0, 360),   def: [0.,0.,0.], disp: "Rotation", groupName: "Particle Transform"},
 		{ name: "instOffset",     			t: PVec(3, -10, 10),  def: [0.,0.,0.], disp: "Offset", groupName: "Particle Transform"},
 	];
 
-	public static var PARAMS : Array<ParamDef> = {
-		var a = emitterParams.copy();
+
+	public static var PARAMS : Map<String, ParamDef> = {
+		var map = new Map();
+		for(e in emitterParams) {
+			map.set(e.name, e);
+		}
 		for(i in instanceParams) {
 			i.instance = true;
 			i.animate = true;
-			a.push(i);
+			map.set(i.name, i);
 		}
-		a;
+		map;
 	};
 
 	override function save() {
-		var obj : Dynamic = super.save();
-		obj.props = Reflect.copy(props);
+		var data = super.save();
+		data.props = Reflect.copy(props);
 		for(param in PARAMS) {
 			var f : Dynamic = Reflect.field(props, param.name);
 			if(f != null && haxe.Json.stringify(f) != haxe.Json.stringify(param.def)) {
@@ -1438,13 +1485,13 @@ class Emitter extends Object3D {
 						val = Type.enumConstructor(val);
 					default:
 				}
-				Reflect.setField(obj.props, param.name, val);
+				Reflect.setField(data.props, param.name, val);
 			}
 			else {
-				Reflect.deleteField(obj.props, param.name);
+				Reflect.deleteField(data.props, param.name);
 			}
 		}
-		return obj;
+		return data;
 	}
 
 	override function load( obj : Dynamic ) {
@@ -1454,9 +1501,36 @@ class Emitter extends Object3D {
 				var val : Dynamic = Reflect.field(obj.props, param.name);
 				switch(param.t) {
 					case PEnum(en):
-						val = Type.createEnum(en, val);
+						#if editor
+						try {
+						#end
+							val = Type.createEnum(en, val);
+						#if editor
+						} catch (e) {
+							val = param.def;
+						};
+						#end
 					default:
 				}
+				Reflect.setField(props, param.name, val);
+			}
+			else if(param.def != null)
+				resetParam(param);
+			else if (param.name == "randomGradient")
+				(props:Dynamic).randomGradient = Gradient.getDefaultGradientData();
+		}
+	}
+
+	override function copy(obj:Prefab) {
+		super.copy(obj);
+		for(param in emitterParams) {
+			if(Reflect.hasField(obj.props, param.name)) {
+				var val : Dynamic = Reflect.field(obj.props, param.name);
+				/*switch(param.t) {
+					case PEnum(en):
+						val = Type.createEnum(en, val);
+					default:
+				}*/
 				Reflect.setField(props, param.name, val);
 			}
 			else if(param.def != null)
@@ -1464,23 +1538,13 @@ class Emitter extends Object3D {
 		}
 	}
 
-	override function make(ctx: Context) {
-		if( ctx == null ) {
-			ctx = new Context();
-			ctx.init();
-		}
-		ctx = makeInstance(ctx);
-		return ctx;
-	}
-
-
 
 	static inline function randProp(name: String) {
 		return name + "_rand";
 	}
 
 	function getParamVal(name: String, rand: Bool=false) : Dynamic {
-		var param = PARAMS.find(p -> p.name == name);
+		var param = PARAMS.get(name);
 		if(param == null)
 			return Reflect.field(props, name);
 		var isVector = switch(param.t) {
@@ -1499,16 +1563,21 @@ class Emitter extends Object3D {
 	}
 
 	function resetParam(param: ParamDef) {
-		var a = Std.downcast(param.def, Array);
-		if(a != null)
-			Reflect.setField(props, param.name, a.copy());
+		if(param.def is Array)
+			Reflect.setField(props, param.name, cast(param.def, Array<Dynamic>).copy());
 		else
 			Reflect.setField(props, param.name, param.def);
 	}
 
-	override function updateInstance( ctx: Context, ?propName : String ) {
-		super.updateInstance(ctx, propName);
-		var emitterObj = Std.downcast(ctx.local3d, EmitterObject);
+	override function updateInstance(?propName : String ) {
+		super.updateInstance(propName);
+		var emitterObj = Std.downcast(local3d, EmitterObject);
+
+		// if we are in a subEmitter
+		if (emitterObj == null) {
+			parent.updateInstance();
+			return;
+		}
 
 		var randIdx = 0;
 		var template : Object3D = cast children.find(
@@ -1536,16 +1605,9 @@ class Emitter extends Object3D {
 				if(b == VOne) return a;
 				switch a {
 					case VConst(va):
-						switch b {
-							case VConst(vb): return VConst(va * vb);
-							case VCurve(cb): return VCurveScale(cb, va);
-							default:
-						}
+						return VMult(a, b);
 					case VCurve(ca):
-						switch b {
-							case VConst(vb): return VCurveScale(ca, vb);
-							default:
-						}
+						return VMult(a, b);
 					case VRandomScale(ri,rscale):
 						switch b {
 							case VCurve(vb): return VAddRandCurve(0, ri, rscale, vb);
@@ -1583,10 +1645,10 @@ class Emitter extends Object3D {
 
 			function makeCompVal(baseProp: Null<Float>, defVal: Float, randProp: Null<Float>, pname: String, suffix: String) : Value {
 				var xVal = vVal(baseProp != null ? baseProp : defVal);
-				var randCurve = getCurve(pname + suffix + ".rand");
+				var randCurve = getCurve(pname + suffix + ":rand");
 				var randVal : Value = VZero;
 				if(randCurve != null)
-					randVal = VRandom(randIdx++, VCurveScale(randCurve, randProp != null ? randProp : 1.0));
+					randVal = VRandom(randIdx++, VMult(randCurve.makeVal(), VConst(randProp != null ? randProp : 1.0)));
 				else if(randProp != null && randProp != 0.0)
 					randVal = VRandomScale(randIdx++, randProp);
 
@@ -1597,9 +1659,9 @@ class Emitter extends Object3D {
 					}
 					else {
 						if (pname.indexOf("Rotation") >= 0 || pname.indexOf("Offset") >= 0)
-							return vAdd(vAdd(xVal, randVal), VCurve(xCurve));
+							return vAdd(vAdd(xVal, randVal), xCurve.makeVal());
 						else
-							return vMult(vAdd(xVal, randVal), VCurve(xCurve));
+							return vMult(vAdd(xVal, randVal), xCurve.makeVal());
 					}
 				}
 				else
@@ -1608,7 +1670,7 @@ class Emitter extends Object3D {
 
 			var baseProp: Dynamic = Reflect.field(props, name);
 			var randProp: Dynamic = Reflect.field(props, randProp(name));
-			var param = PARAMS.find(p -> p.name == name);
+			var param = PARAMS.get(name);
 			switch(param.t) {
 				case PVec(_):
 					inline function makeComp(idx, suffix) {
@@ -1619,9 +1681,9 @@ class Emitter extends Object3D {
 							param.name, suffix);
 					}
 					var v : Value = VVector(
-						makeComp(0, ".x"),
-						makeComp(1, ".y"),
-						makeComp(2, ".z"));
+						makeComp(0, ":x"),
+						makeComp(1, ":y"),
+						makeComp(2, ":z"));
 					if(v.match(VVector(VZero, VZero, VZero)))
 						v = VZero;
 					else if(v.match(VVector(VOne, VOne, VOne)))
@@ -1646,10 +1708,12 @@ class Emitter extends Object3D {
 		d.startSpeed = makeParam(this, "instStartSpeed");
 		d.startWorldSpeed = makeParam(this, "instStartWorldSpeed");
 		d.orbitSpeed = makeParam(this, "instOrbitSpeed");
+		d.orbitSpeedOverTime = makeParam(this, "instOrbitSpeedOverTime");
 		d.acceleration = makeParam(this, "instAcceleration");
 		d.worldAcceleration = makeParam(this, "instWorldAcceleration");
 		d.localOffset = makeParam(this, "instOffset");
 		d.scale = makeParam(this, "instScale");
+		d.scaleOverTime = makeParam(this, "instScaleOverTime");
 		d.dampen = makeParam(this, "instDampen");
 		d.maxVelocity = makeParam(this, "instMaxVelocity");
 		d.stretch = makeParam(this, "instStretch");
@@ -1673,6 +1737,7 @@ class Emitter extends Object3D {
 		emitterObj.lifeTimeRand 		= 	getParamVal("lifeTimeRand");
 		emitterObj.speedFactor 			= 	getParamVal("speedFactor");
 		emitterObj.warmUpTime 			= 	getParamVal("warmUpTime");
+		emitterObj.delay 				= 	getParamVal("delay");
 		// EMIT PARAMS
 		emitterObj.emitType 			= 	getParamVal("emitType");
 		emitterObj.burstCount 			= 	getParamVal("burstCount");
@@ -1680,6 +1745,7 @@ class Emitter extends Object3D {
 		emitterObj.burstParticleCount 	= 	getParamVal("burstParticleCount");
 		emitterObj.emitDuration 		= 	getParamVal("emitDuration");
 		emitterObj.simulationSpace 		= 	getParamVal("simulationSpace");
+		emitterObj.particleScaling		= 	getParamVal("particleScaling");
 		emitterObj.emitOrientation 		= 	getParamVal("emitOrientation");
 		emitterObj.maxCount 			= 	getParamVal("maxCount");
 		emitterObj.enableSort 			= 	getParamVal("enableSort");
@@ -1719,7 +1785,7 @@ class Emitter extends Object3D {
 
 
 		#if !editor  // Keep startTime at 0 in Editor, since global.time is synchronized to timeline
-		var scene = ctx.local3d.getScene();
+		var scene = local3d.getScene();
 		if(scene != null)
 			emitterObj.startTime = @:privateAccess scene.renderer.ctx.time;
 		#end
@@ -1732,22 +1798,23 @@ class Emitter extends Object3D {
 		#end
 	}
 
-	override function makeInstance(ctx:Context):Context {
-		ctx = ctx.clone(this);
-		var emitterObj = new EmitterObject(ctx.local3d);
-		emitterObj.context = ctx;
-		ctx.local3d = emitterObj;
-		ctx.local3d.name = name;
-		updateInstance(ctx);
-		return ctx;
-	}
+	override function makeChild(p:Prefab) {
+	};
 
-	override function removeInstance(ctx:Context):Bool {
-		return false;
+	override function makeObject(parent3d: h3d.scene.Object) : h3d.scene.Object {
+		return new EmitterObject(parent3d);
 	}
 
 	#if editor
-	override function edit( ctx : EditContext ) {
+	/*override function editorRemoveInstance() : Bool {
+		return false; // Emitter removal is buggy
+	}*/
+
+	override function onEditorTreeChanged(child: Prefab) : hrt.prefab.Prefab.TreeChangedResult {
+		return Rebuild;
+	}
+
+	override function edit( ctx : hide.prefab.EditContext ) {
 		super.edit(ctx);
 
 		function refresh() {
@@ -1858,7 +1925,7 @@ class Emitter extends Object3D {
 
 			for( gn in groupNames ) {
 				var params = params.filter( p -> p.groupName == (gn == "Emitter" ? null : gn) );
-				var group = new Element('<div class="group" name="$gn"></div>');
+				var group = new hide.Element('<div class="group" name="$gn"></div>');
 				group.append(hide.comp.PropsEditor.makePropsList(params));
 				ctx.properties.add(group, this.props, onChange);
 			}
@@ -1877,12 +1944,12 @@ class Emitter extends Object3D {
 
 			for (groupName => params in groups)
 			{
-				var instGroup = new Element('<div class="group" name="$groupName"></div>');
-				var dl = new Element('<dl>').appendTo(instGroup);
+				var instGroup = new hide.Element('<div class="group" name="$groupName"></div>');
+				var dl = new hide.Element('<dl>').appendTo(instGroup);
 
 				for (p in params) {
-					var dt = new Element('<dt>${p.disp != null ? p.disp : p.name}</dt>').appendTo(dl);
-					var dd = new Element('<dd>').appendTo(dl);
+					var dt = new hide.Element('<dt>${p.disp != null ? p.disp : p.name}</dt>').appendTo(dl);
+					var dd = new hide.Element('<dd>').appendTo(dl);
 
 					function addUndo(pname: String) {
 						ctx.properties.undo.change(Field(this.props, pname, Reflect.field(this.props, pname)), function() {
@@ -1914,15 +1981,15 @@ class Emitter extends Object3D {
 						});
 					}
 					else {
-						var btn = new Element('<input type="button" value="+"></input>').appendTo(dd);
+						var btn = new hide.Element('<input type="button" value="+"></input>').appendTo(dd);
 						btn.click(function(e) {
 							addUndo(p.name);
 							resetParam(p);
 							refresh();
 						});
 					}
-					var dt = new Element('<dt>~</dt>').appendTo(dl);
-					var dd = new Element('<dd>').appendTo(dl);
+					var dt = new hide.Element('<dt>~</dt>').appendTo(dl);
+					var dd = new hide.Element('<dd>').appendTo(dl);
 					var randDef : Dynamic = switch(p.t) {
 						case PVec(n): [for(i in 0...n) 0.0];
 						case PFloat(_): 0.0;
@@ -1953,7 +2020,7 @@ class Emitter extends Object3D {
 						});
 					}
 					else {
-						var btn = new Element('<input type="button" value="+"></input>').appendTo(dd);
+						var btn = new hide.Element('<input type="button" value="+"></input>').appendTo(dd);
 						btn.click(function(e) {
 							addUndo(randProp(p.name));
 							Reflect.setField(this.props, randProp(p.name), randDef);
@@ -1967,8 +2034,8 @@ class Emitter extends Object3D {
 		}
 	}
 
-	override function setSelected( ctx : Context, b : Bool ) {
-		var emitterObj = Std.downcast(ctx.local3d, EmitterObject);
+	override function setSelected(b : Bool ) {
+		var emitterObj = Std.downcast(local3d, EmitterObject);
 		if(emitterObj == null)
 			return false;
 		var debugShape : h3d.scene.Object = emitterObj.find(c -> if(c.name == "_highlight") c else null);
@@ -2089,12 +2156,16 @@ class Emitter extends Object3D {
 		return debugShape;
 	}
 
+	function onChildUpdate(p: Prefab) {
+		shared.editor.queueRebuild(this);
+	}
+
 	override function getHideProps() : HideProps {
-		return { icon : "asterisk", name : "Emitter", allowParent : function(p) return p.to(FX) != null || p.getParent(FX) != null };
+		return { icon : "asterisk", name : "Emitter", allowParent : function(p) return p.to(FX) != null || p.findParent(FX) != null, onChildUpdate: onChildUpdate};
 	}
 	#end
 
-	static var _ = Library.register("emitter", Emitter);
+	static var _ = Prefab.register("emitter", Emitter);
 
 }
 

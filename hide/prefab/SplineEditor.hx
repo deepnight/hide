@@ -83,15 +83,17 @@ class SplineEditor {
 	var interactive : h2d.Interactive;
 
 	 // Easy way to keep track of viewers
-	var gizmos : Array<hide.view.l3d.Gizmo> = [];
+	var gizmos : Array<hrt.tools.Gizmo> = [];
 	var newSplinePointViewer : NewSplinePointViewer;
+
+	var grid : h3d.scene.Object;
 
 	public function new( prefab : Spline, undo : hide.ui.UndoHistory ){
 		this.prefab = prefab;
 		this.undo = undo;
 	}
 
-	public function update( ctx : hrt.prefab.Context , ?propName : String ) {
+	public function update(?propName : String ) {
 		if( editMode ) {
 			showViewers();
 		}
@@ -110,12 +112,8 @@ class SplineEditor {
 		}
 	}
 
-	inline function getContext() {
-		return editContext.getContext(prefab);
-	}
-
-	function getClosestSplinePointFromMouse( mouseX : Float, mouseY : Float, ctx : hrt.prefab.Context ) : SplinePoint {
-		if( ctx == null || ctx.local3d == null || ctx.local3d.getScene() == null )
+	function getClosestSplinePointFromMouse( mouseX : Float, mouseY : Float) : SplinePoint {
+		if(prefab == null || prefab.local3d == null || prefab.local3d.getScene() == null )
 			return null;
 
 		var mousePos = new h3d.Vector( mouseX / h3d.Engine.getCurrent().width, 1.0 - mouseY / h3d.Engine.getCurrent().height, 0);
@@ -123,7 +121,7 @@ class SplineEditor {
 		var result : SplinePoint = null;
 		for( sp in prefab.points ) {
 			var screenPos = sp.getPoint().toVector();
-			screenPos.project(ctx.local3d.getScene().camera.m);
+			screenPos.project(prefab.local3d.getScene().camera.m);
 			screenPos.z = 0;
 			screenPos.scale(0.5);
 			screenPos = screenPos.add(new h3d.Vector(0.5,0.5));
@@ -136,18 +134,18 @@ class SplineEditor {
 		return result;
 	}
 
-	function getNewPointPosition( mouseX : Float, mouseY : Float, ctx : hrt.prefab.Context ) : SplinePointData {
+	function getNewPointPosition( mouseX : Float, mouseY : Float) : SplinePointData {
 		if( prefab.points.length == 0 ) {
-			return { pos : ctx.local3d.getAbsPos().getPosition().toPoint(), tangent : ctx.local3d.getAbsPos().right().toPoint() , prev : null, next : null };
+			return { pos : prefab.local3d.getAbsPos().getPosition().toPoint(), tangent : prefab.local3d.getAbsPos().right().toPoint() , prev : null, next : null };
 		}
 
-		var closestPt = getClosestPointFromMouse(mouseX, mouseY, ctx);
+		var closestPt = getClosestPointFromMouse(mouseX, mouseY);
 
 		// If we are are adding a new point at the beginning/end, just make a raycast 'cursor -> plane' with the transform of the first/last SplinePoint
 		if( !prefab.loop && (closestPt.next == null || closestPt.prev == null) ) {
-			var camera = @:privateAccess ctx.local3d.getScene().camera;
+			var camera = @:privateAccess prefab.local3d.getScene().camera;
 			var ray = camera.rayFromScreen(mouseX, mouseY);
-			var normal = closestPt.next == null ? closestPt.prev.getAbsPos().up().toPoint() : closestPt.next.getAbsPos().up().toPoint();
+			var normal = getClosestPlanNormal();
 			var point = closestPt.next == null ? closestPt.prev.getAbsPos().getPosition().toPoint() : closestPt.next.getAbsPos().getPosition().toPoint();
 			var plane = h3d.col.Plane.fromNormalPoint(normal, point);
 			var pt = ray.intersect(plane);
@@ -157,9 +155,36 @@ class SplineEditor {
 			return closestPt;
 	}
 
-	function getClosestPointFromMouse( mouseX : Float, mouseY : Float, ctx : hrt.prefab.Context ) : SplinePointData {
+	/**
+		Used to get the normal of the plan that is the more parallel to the viewport
+	**/
+	function getClosestPlanNormal() {
+		var camera = @:privateAccess prefab.local3d.getScene().camera;
+		var x = new h3d.Vector(1,0,0);
+		var y = new h3d.Vector(0,1,0);
+		var z = new h3d.Vector(0,0,1);
 
-		if( ctx == null || ctx.local3d == null || ctx.local3d.getScene() == null )
+		var normal = x;
+		var dot = Math.abs(camera.getForward().dot(x));
+
+		var tmpDot = Math.abs(camera.getForward().dot(y));
+		if (tmpDot > dot) {
+			normal = y;
+			dot = tmpDot;
+		}
+
+		tmpDot = Math.abs(camera.getForward().dot(z));
+		if (tmpDot > dot) {
+			normal = z;
+			dot = tmpDot;
+		}
+
+		return normal;
+	}
+
+	function getClosestPointFromMouse( mouseX : Float, mouseY : Float) : SplinePointData {
+
+		if(prefab == null || prefab.local3d == null || prefab.local3d.getScene() == null )
 			return null;
 
 		var result : SplinePointData = null;
@@ -167,7 +192,7 @@ class SplineEditor {
 		var minDist = -1.0;
 		for( s in prefab.data.samples ) {
 			var screenPos = s.pos.toVector();
-			screenPos.project(ctx.local3d.getScene().camera.m);
+			screenPos.project(prefab.local3d.getScene().camera.m);
 			screenPos.z = 0;
 			screenPos.scale(0.5);
 			screenPos = screenPos.add(new h3d.Vector(0.5,0.5));
@@ -184,7 +209,7 @@ class SplineEditor {
 			var firstSp = prefab.points[0];
 			var firstPt = firstSp.getPoint();
 			var firstPtScreenPos = firstPt.toVector();
-			firstPtScreenPos.project(ctx.local3d.getScene().camera.m);
+			firstPtScreenPos.project(prefab.local3d.getScene().camera.m);
 			firstPtScreenPos.z = 0;
 			firstPtScreenPos.scale(0.5);
 			firstPtScreenPos = firstPtScreenPos.add(new h3d.Vector(0.5,0.5));
@@ -193,7 +218,7 @@ class SplineEditor {
 			var lastSp = prefab.points[prefab.points.length - 1];
 			var lastPt = lastSp.getPoint();
 			var lastPtSreenPos = lastPt.toVector();
-			lastPtSreenPos.project(ctx.local3d.getScene().camera.m);
+			lastPtSreenPos.project(prefab.local3d.getScene().camera.m);
 			lastPtSreenPos.z = 0;
 			lastPtSreenPos.scale(0.5);
 			lastPtSreenPos = lastPtSreenPos.add(new h3d.Vector(0.5,0.5));
@@ -216,9 +241,9 @@ class SplineEditor {
 		return result;
 	}
 
-	function addSplinePoint( spd : SplinePointData, ctx : hrt.prefab.Context ) : SplinePoint {
+	function addSplinePoint( spd : SplinePointData) : SplinePoint {
 
-		var invMatrix = ctx.local3d.getInvPos();
+		var invMatrix = prefab.local3d.getInvPos();
 
 		var pos = spd.pos.toVector();
 		pos.project(invMatrix);
@@ -242,7 +267,7 @@ class SplineEditor {
 			scale = (spd.prev.scaleX + spd.next.scaleX) * 0.5;
 		}
 
-		var sp = new SplinePoint(prefab);
+		var sp = new SplinePoint(prefab, null);
 		sp.x = pos.x;
 		sp.y = pos.y;
 		sp.z = pos.z;
@@ -252,16 +277,21 @@ class SplineEditor {
 			var dir = spd.tangent.toVector();
 			dir.transform3x3(invMatrix); // Don't take the translation
 			dir.scale(-1);
-			sp.rotationX = h3d.Matrix.lookAtX(dir).getFloats()[0];
-			sp.rotationY = h3d.Matrix.lookAtX(dir).getFloats()[1];
-			sp.rotationZ = h3d.Matrix.lookAtX(dir).getFloats()[2];
+			var m = h3d.Matrix.lookAtX(dir);
+			var euler = m.getEulerAngles();
+			sp.rotationX = hxd.Math.radToDeg(euler.x);
+			sp.rotationY = hxd.Math.radToDeg(euler.y);
+			sp.rotationZ = hxd.Math.radToDeg(euler.z);
+
+			trace(sp.rotationX, sp.rotationY, sp.rotationZ);
+
 		}
 		sp.scaleX = scale;
 		sp.scaleY = scale;
 		sp.scaleZ = scale;
 		editContext.scene.editor.addElements([sp], false, true, false);
 
-		prefab.updateInstance(ctx);
+		prefab.updateInstance();
 		showViewers();
 		return sp;
 	}
@@ -286,12 +316,17 @@ class SplineEditor {
 		gizmos = [];
 	}
 
-	function createGizmos( ctx : hrt.prefab.Context  ) {
+	function createGizmos() {
 		removeGizmos(); // Security, avoid duplication
 		var sceneEditor = @:privateAccess editContext.scene.editor;
 		var sceneGizmo = @:privateAccess sceneEditor.gizmo;
 		for( sp in prefab.points ) {
-			var gizmo = new hide.view.l3d.Gizmo(editContext.scene);
+			var gizmo = new hrt.tools.Gizmo(editContext.scene.s3d, editContext.scene.s2d);
+			gizmo.snap = sceneEditor.gizmoSnap;
+			gizmo.shoudSnapOnGrid = function() {
+				return sceneEditor.snapForceOnGrid;
+			}
+
 			switch(sceneGizmo.editMode) {
 				case Translation:
 					gizmo.translationMode();
@@ -325,7 +360,7 @@ class SplineEditor {
 
 			gizmo.onStartMove = function(mode) {
 
-				var sceneObj = sceneEditor.getContext(sp).local3d;
+				var sceneObj = sp.local3d;
 				var obj3d = sp.to(hrt.prefab.Object3D);
 				var pivotPt = sceneObj.getAbsPos().getPosition();
 				var pivot = new h3d.Matrix();
@@ -376,7 +411,7 @@ class SplineEditor {
 						obj3d.scaleY = quantize(scaleSnap(s.y), scaleQuant);
 						obj3d.scaleZ = quantize(scaleSnap(s.z), scaleQuant);
 					}
-					obj3d.applyTransform(sceneObj);
+					obj3d.applyTransform();
 				}
 
 				gizmo.onFinishMove = function() {
@@ -384,22 +419,22 @@ class SplineEditor {
 					undo.change(Custom(function(undo) {
 						if( undo ) {
 							obj3d.loadTransform(prevState);
-							obj3d.applyTransform(sceneObj);
-							prefab.updateInstance(ctx);
+							obj3d.applyTransform();
+							prefab.updateInstance();
 							showViewers();
-							@:privateAccess editContext.scene.editor.refresh(Partial);
+							@:privateAccess editContext.scene.editor.refreshTree();
 							showViewers();
-							createGizmos(ctx);
+							createGizmos();
 						}
 						else {
 							obj3d.loadTransform(newState);
-							obj3d.applyTransform(sceneObj);
-							prefab.updateInstance(ctx);
+							obj3d.applyTransform();
+							prefab.updateInstance();
 							showViewers();
-							createGizmos(ctx);
+							createGizmos();
 						}
 					}));
-					var worldPos = ctx.local3d.localToGlobal(new h3d.col.Point(sp.x, sp.y, sp.z));
+					var worldPos = prefab.local3d.localToGlobal(new h3d.col.Point(sp.x, sp.y, sp.z));
 					gizmo.setPosition(worldPos.x, worldPos.y, worldPos.z);
 				}
 			}
@@ -418,7 +453,7 @@ class SplineEditor {
 		};
 	}
 
-	public function setSelected( ctx : hrt.prefab.Context , b : Bool ) {
+	public function setSelected(b : Bool ) {
 		reset();
 
 		if( !b ) {
@@ -427,8 +462,8 @@ class SplineEditor {
 		}
 
 		if( editMode ) {
-			createGizmos(ctx);
-			var s2d = ctx.shared.root2d.getScene();
+			createGizmos();
+			var s2d = prefab.shared.root2d.getScene();
 			interactive = new h2d.Interactive(10000, 10000, s2d);
 			interactive.propagateEvents = true;
 			interactive.onPush =
@@ -436,25 +471,25 @@ class SplineEditor {
 					// Add a new point
 					if( K.isDown( K.MOUSE_LEFT ) && K.isDown( K.CTRL )  ) {
 						e.propagate = false;
-						var pt = getNewPointPosition(s2d.mouseX, s2d.mouseY, ctx);
-						var sp = addSplinePoint(pt, ctx);
+						var pt = getNewPointPosition(s2d.mouseX, s2d.mouseY);
+						var sp = addSplinePoint(pt);
 						showViewers();
-						createGizmos(ctx);
+						createGizmos();
 
 						undo.change(Custom(function(undo) {
 							if( undo ) {
 								editContext.scene.editor.deleteElements([sp], () -> {}, false, false);
 								for (sp in prefab.points)
-									sp.computeName(editContext.getContext(sp));
-								@:privateAccess editContext.scene.editor.refresh(Partial);
-								prefab.updateInstance(ctx);
+									sp.computeName();
+								@:privateAccess editContext.scene.editor.refreshTree();
+								prefab.updateInstance();
 								showViewers();
-								createGizmos(ctx);
+								createGizmos();
 							}
 							else {
-								addSplinePoint(pt, ctx);
+								addSplinePoint(pt);
 								showViewers();
-								createGizmos(ctx);
+								createGizmos();
 							}
 						}));
 
@@ -462,33 +497,33 @@ class SplineEditor {
 					// Delete a point
 					if( K.isDown( K.MOUSE_LEFT ) && K.isDown( K.SHIFT )  ) {
 						e.propagate = false;
-						var sp = getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY, ctx);
+						var sp = getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY);
 						var index = prefab.points.indexOf(sp);
 						editContext.scene.editor.deleteElements([sp], () -> {}, false, false);
 						for (sp in prefab.points)
-							sp.computeName(editContext.getContext(sp));
-						@:privateAccess editContext.scene.editor.refresh(Partial);
+							sp.computeName();
+						@:privateAccess editContext.scene.editor.refreshTree();
 
-						prefab.updateInstance(ctx);
+						prefab.updateInstance();
 						showViewers();
-						createGizmos(ctx);
+						createGizmos();
 
 						undo.change(Custom(function(undo) {
 							if( undo ) {
 								prefab.children.insert(index, sp);
 								editContext.scene.editor.addElements([sp], false, true, false);
-								prefab.updateInstance(ctx);
+								prefab.updateInstance();
 								showViewers();
-								createGizmos(ctx);
+								createGizmos();
 							}
 							else {
 								editContext.scene.editor.deleteElements([sp], () -> {}, false, false);
 								for (sp in prefab.points)
-									sp.computeName(editContext.getContext(sp));
-								@:privateAccess editContext.scene.editor.refresh(Partial);
-								prefab.updateInstance(ctx);
+									sp.computeName();
+								@:privateAccess editContext.scene.editor.refreshTree();
+								prefab.updateInstance();
 								showViewers();
-								createGizmos(ctx);
+								createGizmos();
 							}
 						}));
 					}
@@ -501,7 +536,7 @@ class SplineEditor {
 						return;
 
 					// Only show the gizmo of the closest splinePoint
-					var closetSp = getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY, ctx);
+					var closetSp = getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY);
 					var index = prefab.points.indexOf(closetSp);
 					for( g in gizmos ) {
 						g.visible = gizmos.indexOf(g) == index && !K.isDown( K.CTRL ) && !K.isDown( K.SHIFT );
@@ -509,19 +544,34 @@ class SplineEditor {
 
 					if( K.isDown( K.CTRL ) ) {
 						if( newSplinePointViewer == null )
-							newSplinePointViewer = new NewSplinePointViewer(ctx.local3d.getScene());
+							newSplinePointViewer = new NewSplinePointViewer(prefab.local3d.getScene());
 						newSplinePointViewer.visible = true;
 
-						var npt = getNewPointPosition(s2d.mouseX, s2d.mouseY, ctx);
+						var npt = getNewPointPosition(s2d.mouseX, s2d.mouseY);
+
+						if (grid != null) {
+							grid.remove();
+							grid = null;
+						}
+
+						var normal = getClosestPlanNormal();
+						var closest = getClosestPointFromMouse(s2d.mouseX, s2d.mouseY);
+						grid = editContext.scene.editor.createGrid(closest.pos , normal, 200, 1, normal * 0.2);
+
 						newSplinePointViewer.update(npt);
 					}
 					else {
 						if( newSplinePointViewer != null )
 							newSplinePointViewer.visible = false;
+
+						if (grid != null) {
+							grid.remove();
+							grid = null;
+						}
 					}
 
 					if( K.isDown( K.SHIFT ) ) {
-						var index = prefab.points.indexOf(getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY, ctx));
+						var index = prefab.points.indexOf(getClosestSplinePointFromMouse(s2d.mouseX, s2d.mouseY));
 						for( sp in prefab.points ) {
 							if( index == prefab.points.indexOf(sp) )
 								sp.setColor(0xFFFF0000);
@@ -561,21 +611,21 @@ class SplineEditor {
 			prefab.children.reverse();
 			for (sp in prefab.points) {
 				sp.rotationZ += hxd.Math.degToRad(180);
-				sp.computeName(editContext.getContext(sp));
+				sp.computeName();
 			}
-			@:privateAccess editContext.scene.editor.refresh(Partial);
+			@:privateAccess editContext.scene.editor.refreshTree();
 
 			undo.change(Custom(function(undo) {
 				prefab.children.reverse();
 				for (sp in prefab.points) {
 					sp.rotationZ += hxd.Math.degToRad(180);
-					sp.computeName(editContext.getContext(sp));
+					sp.computeName();
 				}
-				@:privateAccess editContext.scene.editor.refresh(Partial);
+				@:privateAccess editContext.scene.editor.refreshTree();
 			}));
 			ctx.onChange(prefab, null);
 			removeGizmos();
-			createGizmos(getContext());
+			createGizmos();
 		});
 
 		var editModeButton = props.find(".editModeButton");
@@ -585,8 +635,8 @@ class SplineEditor {
 			prefab.onEdit(editMode);
 			editModeButton.val(editMode ? "Edit Mode : Enabled" : "Edit Mode : Disabled");
 			editModeButton.toggleClass("editModeEnabled", editMode);
-			prefab.updateInstance(ctx.getContext(prefab));
-			setSelected(getContext(), true);
+			prefab.updateInstance();
+			setSelected(true);
 			@:privateAccess editContext.scene.editor.showGizmo = !editMode;
 			ctx.onChange(prefab, null);
 		});

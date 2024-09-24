@@ -36,7 +36,8 @@ typedef ShadowSamplingPCF = {> ShadowSamplingMode,
 }
 
 typedef CascadeParams = {
-	var bias : Float;
+	var depthBias : Float;
+	var slopeBias : Float;
 }
 
 class Light extends Object3D {
@@ -75,12 +76,19 @@ class Light extends Object3D {
 	@:s public var cascadeNbr : Int = 1;
 	@:s public var cascadePow : Float = 2;
 	@:s public var firstCascadeSize : Float = 10;
+	@:s public var minPixelRatio : Float = 0.5;
 	@:s public var castingMaxDist : Float = 0.0;
+	@:s public var transitionFraction : Float = 0.15;
 	@:s public var params : Array<CascadeParams> = [];
 	@:s public var debugShader : Bool = false;
+	@:s public var highPrecision : Bool = false;
 
 	// Debug
 	@:s public var debugDisplay : Bool = true;
+
+	#if editor
+	var icon : hrt.impl.EditorTools.EditorIcon = null;
+	#end
 
 	static function getShadowsDefault() : LightShadows {
 		return {
@@ -95,14 +103,13 @@ class Light extends Object3D {
 		};
 	}
 
-	public function new(?parent) {
-		super(parent);
-		type = "light";
+	public function new(parent, shared: ContextShared) {
+		super(parent, shared);
 		range = 10;
 		zNear = 0.02;
 	}
 
-	override function save() {
+	override function save() : Dynamic {
 		var obj : Dynamic = super.save();
 		if( shadows.mode != None ) {
 			obj.shadows = Reflect.copy(shadows);
@@ -117,23 +124,29 @@ class Light extends Object3D {
 		super.load(obj);
 		if( obj.shadows != null ) {
 			var sh : Dynamic = Reflect.copy(obj.shadows);
-			sh.mode = h3d.pass.Shadows.RenderMode.createByName(sh.mode);
 			shadows = sh;
+			shadows.mode = h3d.pass.Shadows.RenderMode.createByName(sh.mode);
 		} else
 			shadows = getShadowsDefault();
 	}
 
-	override function copy(p:Prefab) {
-		super.copy(p);
-		shadows = copyValue(p.shadows);
+	override function copy(prefab: Prefab) {
+		super.copy(prefab);
 	}
 
-	override function applyTransform( o : h3d.scene.Object ) {
+	override function applyTransform() {
 		//super.applyTransform(o); // Disable scaling
+
+		if (local3d != null)
+			applyTransformToObject(local3d);
+	}
+
+	public function applyTransformToObject( o : h3d.scene.Object ) {
 		o.x = x;
 		o.y = y;
 		o.z = z;
 		o.setRotation(hxd.Math.degToRad(rotationX), hxd.Math.degToRad(rotationY), hxd.Math.degToRad(rotationZ));
+
 	}
 
 	function initTexture( path : String, ?wrap : h3d.mat.Data.Wrap ) {
@@ -145,56 +158,48 @@ class Light extends Object3D {
 		return null;
 	}
 
-	override function makeInstance( ctx : Context ) : Context {
-		ctx = ctx.clone(this);
+	override function makeObject(parent3d:h3d.scene.Object) : h3d.scene.Object {
+		var object : h3d.scene.Object = null;
 
 		var isPbr = Std.isOfType(h3d.mat.MaterialSetup.current, h3d.mat.PbrMaterialSetup);
 		if( !isPbr ) {
 			switch( kind ) {
-			case Point: ctx.local3d = new h3d.scene.fwd.PointLight(ctx.local3d);
-			case Directional: ctx.local3d = new h3d.scene.fwd.DirLight(ctx.local3d);
+			case Point: object = new h3d.scene.fwd.PointLight(parent3d);
+			case Directional: object = new h3d.scene.fwd.DirLight(parent3d);
 			case Spot:
 			case Capsule:
 			}
 		} else {
 			switch( kind ) {
-			case Point: ctx.local3d = new h3d.scene.pbr.PointLight(ctx.local3d);
-			case Directional: ctx.local3d = new h3d.scene.pbr.DirLight(ctx.local3d, cascade);
-			case Spot: ctx.local3d = new h3d.scene.pbr.SpotLight(ctx.local3d);
-			case Capsule: ctx.local3d = new h3d.scene.pbr.CapsuleLight(ctx.local3d);
+			case Point: object = new h3d.scene.pbr.PointLight(parent3d);
+			case Directional: object = new h3d.scene.pbr.DirLight(parent3d, cascade);
+			case Spot: object = new h3d.scene.pbr.SpotLight(parent3d);
+			case Capsule: object = new h3d.scene.pbr.CapsuleLight(parent3d);
 			}
 		}
-		ctx.local3d.name = name;
 
 		#if editor
-		ctx.custom = hrt.impl.EditorTools.create3DIcon(ctx.local3d, hide.Ide.inst.getHideResPath("icons/PointLight.png"), 0.5, Light);
+		icon = hrt.impl.EditorTools.create3DIcon(object, hide.Ide.inst.getHideResPath("icons/PointLight.png"), 0.5, Light);
 		#end
 
 		cookieTex = initTexture(cookiePath);
-		updateInstance(ctx);
-		return ctx;
+
+		return object;
 	}
 
-	#if editor
-	override function removeInstance(ctx:Context):Bool {
-		var icon = Std.downcast(ctx.custom, hrt.impl.EditorTools.EditorIcon);
-		if (icon != null) {
-			icon.remove();
-			ctx.custom = null;
-		}
-		return super.removeInstance(ctx);
-	}
-	#end
+	override function updateInstance(?propName : String ) {
+		super.updateInstance(propName);
 
-	override function updateInstance( ctx : Context, ?propName : String ) {
-		super.updateInstance(ctx, propName);
+		if (local3d == null)
+			return;
 
 		var color = color | 0xff000000;
-		var pbrLight = Std.downcast(ctx.local3d, h3d.scene.pbr.Light);
-		var light = Std.downcast(ctx.local3d, h3d.scene.pbr.Light);
-		if( pbrLight != null ) { // PBR
-			pbrLight.isMainLight = isMainLight;
-			pbrLight.occlusionFactor = occlusionFactor;
+		var pbrLight = Std.downcast(local3d, h3d.scene.pbr.Light);
+		var light = Std.downcast(local3d, h3d.scene.pbr.Light);
+
+		if( light != null ) { // PBR
+			light.isMainLight = isMainLight;
+			light.occlusionFactor = occlusionFactor;
 
 			switch( kind ) {
 			case Directional:
@@ -210,14 +215,17 @@ class Light extends Object3D {
 						cs.cascade = cascadeNbr;
 						cs.pow = cascadePow;
 						cs.firstCascadeSize = firstCascadeSize;
+						cs.minPixelRatio = minPixelRatio * 0.01;
 						cs.debug = debugDisplay;
 						cs.castingMaxDist = castingMaxDist;
+						cs.transitionFraction = transitionFraction;
 						cs.debugShader = debugShader;
 						params.resize(cascadeNbr);
 						for ( i in 0...params.length )
 							if ( params[i] == null )
-								params[i] = {bias : 0.001};
+								params[i] = { depthBias : 1.0, slopeBias : 3.0 };
 						cs.params = params;
+						cs.highPrecision = highPrecision;
 					}
 				}
 			case Spot:
@@ -266,158 +274,7 @@ class Light extends Object3D {
 		}
 
 		#if editor
-		var debugPoint = ctx.local3d.find(c -> if(c.name == "_debugPoint") c else null);
-		var debugDir = ctx.local3d.find(c -> if(c.name == "_debugDir") c else null);
-		var debugSpot = ctx.local3d.find(c -> if(c.name == "_debugSpot") c else null);
-		var debugCapsule = ctx.local3d.find(c -> if(c.name == "_debugCapsule") c else null);
-		var sel : h3d.scene.Object = null;
 
-		switch(kind){
-
-			case Point:
-
-				if(debugDir != null) debugDir.remove();
-				if(debugSpot != null) debugSpot.remove();
-				if(debugCapsule != null) debugCapsule.remove();
-
-				var rangeSphere : h3d.scene.Sphere;
-
-				if(debugPoint == null) {
-					debugPoint = new h3d.scene.Object(ctx.local3d);
-					debugPoint.name = "_debugPoint";
-
-					rangeSphere = new h3d.scene.Sphere(0xffffff, 1, true, debugPoint);
-					rangeSphere.visible = false;
-					rangeSphere.ignoreBounds = true;
-					rangeSphere.ignoreCollide = true;
-					rangeSphere.material.mainPass.setPassName("overlay");
-					rangeSphere.material.shadows = false;
-
-					var sizeSphere = new h3d.scene.Sphere(0xffff00, 1, true, rangeSphere);
-					sizeSphere.visible = true;
-					sizeSphere.ignoreBounds = true;
-					sizeSphere.ignoreCollide = true;
-					sizeSphere.material.mainPass.setPassName("overlay");
-					sizeSphere.material.shadows = false;
-				}
-				else {
-					rangeSphere = cast debugPoint.getChildAt(0);
-				}
-
-				rangeSphere.material.color.setColor(color);
-				cast(rangeSphere.getChildAt(0), h3d.scene.Sphere).setScale(size / range);
-				sel = rangeSphere;
-
-			case Directional :
-
-				if(debugPoint != null) debugPoint.remove();
-				if(debugSpot != null) debugSpot.remove();
-				if(debugCapsule != null) debugCapsule.remove();
-
-				if(debugDir == null) {
-					debugDir = new h3d.scene.Object(ctx.local3d);
-					debugDir.name = "_debugDir";
-
-
-
-					var g = new h3d.scene.Graphics(debugDir);
-					g.lineStyle(1, 0xffffff);
-					g.moveTo(0,0,0);
-					g.lineTo(10,0,0);
-					g.ignoreBounds = true;
-					g.ignoreCollide = true;
-					g.visible = false;
-					g.material.mainPass.setPassName("overlay");
-					sel = g;
-				}
-				else {
-					sel = debugDir.getChildAt(0);
-				}
-
-
-			case Spot:
-
-				if(debugDir != null) debugDir.remove();
-				if(debugPoint != null) debugPoint.remove();
-				if(debugCapsule != null) debugCapsule.remove();
-
-				if(debugSpot == null) {
-					debugSpot = new h3d.scene.Object(ctx.local3d);
-					debugSpot.name = "_debugSpot";
-
-					var g = new h3d.scene.Graphics(debugSpot);
-					g.lineStyle(1, this.color);
-					g.moveTo(0,0,0); g.lineTo(1, 1, 1);
-					g.moveTo(0,0,0); g.lineTo(1, -1, 1);
-					g.moveTo(0,0,0); g.lineTo(1, 1, -1);
-					g.moveTo(0,0,0); g.lineTo(1, -1, -1);
-					g.lineTo(1, 1, -1);
-					g.lineTo(1, 1, 1);
-					g.lineTo(1, -1, 1);
-					g.lineTo(1, -1, -1);
-
-					g.ignoreBounds = true;
-					g.ignoreCollide = true;
-					g.visible = false;
-					g.material.mainPass.setPassName("overlay");
-					sel = g;
-				}
-				else{
-					var g : h3d.scene.Graphics = Std.downcast(debugSpot.getChildAt(0), h3d.scene.Graphics);
-					g.clear();
-					g.lineStyle(1, this.color);
-					g.moveTo(0,0,0); g.lineTo(1, 1, 1);
-					g.moveTo(0,0,0); g.lineTo(1, -1, 1);
-					g.moveTo(0,0,0); g.lineTo(1, 1, -1);
-					g.moveTo(0,0,0); g.lineTo(1, -1, -1);
-					g.lineTo(1, 1, -1);
-					g.lineTo(1, 1, 1);
-					g.lineTo(1, -1, 1);
-					g.lineTo(1, -1, -1);
-
-					sel = g;
-				}
-
-			case Capsule:
-
-				if(debugDir != null) debugDir.remove();
-				if(debugPoint != null) debugPoint.remove();
-				if(debugSpot != null) debugSpot.remove();
-
-				var rangeCapsule : h3d.scene.Capsule;
-
-				if(debugCapsule == null) {
-					debugCapsule = new h3d.scene.Object(ctx.local3d);
-					debugCapsule.name = "_debugCapsule";
-
-					rangeCapsule = new h3d.scene.Capsule(0xffffff, 1, true, debugCapsule);
-					rangeCapsule.visible = false;
-					rangeCapsule.ignoreBounds = true;
-					rangeCapsule.ignoreCollide = true;
-					rangeCapsule.material.mainPass.setPassName("overlay");
-					rangeCapsule.material.shadows = false;
-
-					var sizeCapsule = new h3d.scene.Capsule(0xffff00, 1, true, rangeCapsule);
-					sizeCapsule.visible = true;
-					sizeCapsule.ignoreBounds = true;
-					sizeCapsule.ignoreCollide = true;
-					sizeCapsule.material.mainPass.setPassName("overlay");
-					sizeCapsule.material.shadows = false;
-				}
-				else {
-					rangeCapsule = cast(debugCapsule.getChildAt(0));
-				}
-
-				rangeCapsule.length = length / range;
-				var sizeCapsule = cast(rangeCapsule.getChildAt(0), h3d.scene.Capsule);
-				sizeCapsule.radius = size / range;
-				sizeCapsule.length = length / range;
-				sel = rangeCapsule;
-
-		}
-
-
-		var icon = Std.downcast(ctx.custom, hrt.impl.EditorTools.EditorIcon);
 		if (icon != null) {
 			icon.color = h3d.Vector4.fromColor(color);
 
@@ -433,33 +290,190 @@ class Light extends Object3D {
 					icon.texture = ide.getTexture(ide.getHideResPath("icons/CapsuleLight.png"));
 			}
 		}
-
-		var isSelected = false;
-		if(sel != null){
-			isSelected = sel.visible;
-			if( debugPoint != null ) debugPoint.visible = (isSelected || ctx.shared.editorDisplay);
-			if( debugDir != null ) debugDir.visible = (isSelected || ctx.shared.editorDisplay);
-			if( debugSpot != null ) debugSpot.visible = (isSelected || ctx.shared.editorDisplay);
-			if( debugCapsule != null ) debugCapsule.visible = (isSelected || ctx.shared.editorDisplay);
-			sel.name = "__selection";
-		}
+		
+		refreshDebug();
 
 		// no "Mixed" in editor
 		if( light != null && light.shadows.mode == Mixed ) light.shadows.mode = Dynamic;
-
 		#end
 	}
 
 	#if editor
 
-	override function setSelected( ctx : Context, b : Bool ) {
-		var sel = ctx.local3d.getObjectByName("__selection");
+	function refreshDebug() {
+		if ( local3d == null )
+			return;
+		var debugPoint = local3d.find(c -> if(c.name == "_debugPoint") c else null);
+		var debugDir = local3d.find(c -> if(c.name == "_debugDir") c else null);
+		var debugSpot = local3d.find(c -> if(c.name == "_debugSpot") c else null);
+		var debugCapsule = local3d.find(c -> if(c.name == "_debugCapsule") c else null);
+		var sel : h3d.scene.Object = null;
+
+		switch(kind){
+		case Point:
+			if(debugDir != null) debugDir.remove();
+			if(debugSpot != null) debugSpot.remove();
+			if(debugCapsule != null) debugCapsule.remove();
+
+			var rangeSphere : h3d.scene.Sphere;
+
+			if(debugPoint == null) {
+				debugPoint = new h3d.scene.Object(local3d);
+				debugPoint.name = "_debugPoint";
+
+				rangeSphere = new h3d.scene.Sphere(0xffffff, 1, true, debugPoint);
+				rangeSphere.visible = false;
+				rangeSphere.ignoreBounds = true;
+				rangeSphere.ignoreCollide = true;
+				rangeSphere.material.mainPass.setPassName("overlay");
+				rangeSphere.material.shadows = false;
+
+				var sizeSphere = new h3d.scene.Sphere(0xffff00, 1, true, rangeSphere);
+				sizeSphere.visible = true;
+				sizeSphere.ignoreBounds = true;
+				sizeSphere.ignoreCollide = true;
+				sizeSphere.material.mainPass.setPassName("overlay");
+				sizeSphere.material.shadows = false;
+			}
+			else {
+				rangeSphere = cast debugPoint.getChildAt(0);
+			}
+
+			rangeSphere.material.color.setColor(color);
+			cast(rangeSphere.getChildAt(0), h3d.scene.Sphere).setScale(size / range);
+			sel = rangeSphere;
+
+		case Directional :
+			if(debugPoint != null) debugPoint.remove();
+			if(debugSpot != null) debugSpot.remove();
+			if(debugCapsule != null) debugCapsule.remove();
+
+			if(debugDir == null) {
+				debugDir = new h3d.scene.Object(local3d);
+				debugDir.name = "_debugDir";
+
+
+
+				var g = new h3d.scene.Graphics(debugDir);
+				g.lineStyle(1, 0xffffff);
+				g.moveTo(0,0,0);
+				g.lineTo(10,0,0);
+				g.ignoreBounds = true;
+				g.ignoreCollide = true;
+				g.visible = false;
+				g.material.mainPass.setPassName("overlay");
+				sel = g;
+			}
+			else {
+				sel = debugDir.getChildAt(0);
+			}
+
+		case Spot:
+			if(debugDir != null) debugDir.remove();
+			if(debugPoint != null) debugPoint.remove();
+			if(debugCapsule != null) debugCapsule.remove();
+
+			if(debugSpot == null) {
+				debugSpot = new h3d.scene.Object(local3d);
+				debugSpot.name = "_debugSpot";
+
+				var g = new h3d.scene.Graphics(debugSpot);
+				g.lineStyle(1, this.color);
+				g.moveTo(0,0,0); g.lineTo(1, 1, 1);
+				g.moveTo(0,0,0); g.lineTo(1, -1, 1);
+				g.moveTo(0,0,0); g.lineTo(1, 1, -1);
+				g.moveTo(0,0,0); g.lineTo(1, -1, -1);
+				g.lineTo(1, 1, -1);
+				g.lineTo(1, 1, 1);
+				g.lineTo(1, -1, 1);
+				g.lineTo(1, -1, -1);
+
+				g.ignoreBounds = true;
+				g.ignoreCollide = true;
+				g.visible = false;
+				g.material.mainPass.setPassName("overlay");
+				sel = g;
+			}
+			else{
+				var g : h3d.scene.Graphics = Std.downcast(debugSpot.getChildAt(0), h3d.scene.Graphics);
+				g.clear();
+				g.lineStyle(1, this.color);
+				g.moveTo(0,0,0); g.lineTo(1, 1, 1);
+				g.moveTo(0,0,0); g.lineTo(1, -1, 1);
+				g.moveTo(0,0,0); g.lineTo(1, 1, -1);
+				g.moveTo(0,0,0); g.lineTo(1, -1, -1);
+				g.lineTo(1, 1, -1);
+				g.lineTo(1, 1, 1);
+				g.lineTo(1, -1, 1);
+				g.lineTo(1, -1, -1);
+
+				sel = g;
+			}
+
+		case Capsule:
+			if(debugDir != null) debugDir.remove();
+			if(debugPoint != null) debugPoint.remove();
+			if(debugSpot != null) debugSpot.remove();
+
+			var rangeCapsule : h3d.scene.Capsule;
+
+			if(debugCapsule == null) {
+				debugCapsule = new h3d.scene.Object(local3d);
+				debugCapsule.name = "_debugCapsule";
+
+				rangeCapsule = new h3d.scene.Capsule(0xffffff, 1, true, debugCapsule);
+				rangeCapsule.visible = false;
+				rangeCapsule.ignoreBounds = true;
+				rangeCapsule.ignoreCollide = true;
+				rangeCapsule.material.mainPass.setPassName("overlay");
+				rangeCapsule.material.shadows = false;
+
+				var sizeCapsule = new h3d.scene.Capsule(0xffff00, 1, true, rangeCapsule);
+				sizeCapsule.visible = true;
+				sizeCapsule.ignoreBounds = true;
+				sizeCapsule.ignoreCollide = true;
+				sizeCapsule.material.mainPass.setPassName("overlay");
+				sizeCapsule.material.shadows = false;
+			}
+			else {
+				rangeCapsule = cast(debugCapsule.getChildAt(0));
+			}
+
+			rangeCapsule.length = length / range;
+			var sizeCapsule = cast(rangeCapsule.getChildAt(0), h3d.scene.Capsule);
+			sizeCapsule.radius = size / range;
+			sizeCapsule.length = length / range;
+			sel = rangeCapsule;
+		}
+
+		var isSelected = false;
+		if(sel != null){
+			isSelected = sel.visible;
+			if( debugPoint != null ) debugPoint.visible = (isSelected || shared.editorDisplay);
+			if( debugDir != null ) debugDir.visible = (isSelected || shared.editorDisplay);
+			if( debugSpot != null ) debugSpot.visible = (isSelected || shared.editorDisplay);
+			if( debugCapsule != null ) debugCapsule.visible = (isSelected || shared.editorDisplay);
+			sel.name = "__selection";
+		}
+	}
+
+	override function setSelected(b : Bool ) {
+		var sel = local3d?.getObjectByName("__selection");
 		if( sel != null ) sel.visible = b;
-		updateInstance(ctx);
+		refreshDebug();
+		if (!b && local3d != null)
+			local3d.visible = this.visible && !shared.editor.isHidden(this);
 		return true;
 	}
 
-	override function edit( ctx : EditContext ) {
+	override function editorRemoveInstance() : Void {
+		if (icon != null) {
+			icon.remove();
+		}
+		super.editorRemoveInstance();
+	}
+
+	override function edit( ctx : hide.prefab.EditContext ) {
 		super.edit(ctx);
 
 		var group = new hide.Element('
@@ -527,7 +541,7 @@ class Light extends Object3D {
 				ctx.rebuildProperties();
 			}
 			else{
-				if( pname == "cookiePath") cookieTex = loadTexture(ctx, this.cookiePath, cookieTex, Clamp);
+				if( pname == "cookiePath") cookieTex = loadTextureCustom(this.cookiePath, cookieTex, Clamp);
 				ctx.onChange(this, pname);
 			}
 		});
@@ -557,7 +571,15 @@ class Light extends Object3D {
 		var shadowGroup = new hide.Element('
 			<div class="group" name="Shadows">
 				<dl>
-					<dt>Mode</dt><dd><select field="mode"></select></dd>
+					<dt>Mode</dt>
+					<dd>
+						<select field="mode">
+							<option value="None">None</option>
+							<option value="Static">Static</option>
+							<option value="Mixed">Mixed</option>
+							<option value="Dynamic">Dynamic (Moving light)</option>
+						</select>
+					</dd>
 					<dt>Size</dt>
 					<dd>
 						<select field="size" type="number">
@@ -621,13 +643,16 @@ class Light extends Object3D {
 			'<div class="group" name="Cascades">
 				<dl>
 					<dt>Number</dt><dd><input type="range" field="cascadeNbr" step="1" min="1" max="4"/></dd>
+					<dt>Min pixel ratio [%]</dt><dd><input type="range" field="minPixelRatio" min="0" max="100"/></dd>
 					<dt>First cascade size</dt><dd><input type="range" field="firstCascadeSize" min="5" max="100"/></dd>
 					<dt>Range power</dt><dd><input type="range" field="cascadePow" min="0.1" max="10"/></dd>
 					<dt>Casting max dist</dt><dd><input type="range" field="castingMaxDist" min="-1" max="1000"/></dd>
+					<dt>Transition fraction</dt><dd><input type="range" field="transitionFraction" min="0.0" max="0.3"/></dd>
 					<dl>
 						<ul id="params"></ul>
 					</dl>
 					<dt>Debug shader</dt><dd><input type="checkbox" field="debugShader"/></dd>
+					<dt>High precision</dt><dd><input type="checkbox" field="highPrecision"/></dd>
 				</dl>
 			</div>'
 		);
@@ -641,13 +666,16 @@ class Light extends Object3D {
 		}
 
 		var list = cascadeGroup.find("ul#params");
+
 		for ( param in params ) {
 			var e = new hide.Element('
 			<div class="group" name="Params">
 				<dl>
-					<dt>Bias</dt><dd><input type="range" min="0" max="0.1" field="bias"/></dd>
+					<dt>DepthBias</dt><dd><input type="range" min="0" max="10" step="0.1" field="depthBias"/></dd>
+					<dt>SlopeBias</dt><dd><input type="range" min="0" max="10" step="0.1" field="slopeBias"/></dd>
 				</dl>
-			</div>');
+			</div>
+			');
 			e.appendTo(list);
 			ctx.properties.build(e, param, (pname) -> {
 				ctx.onChange(this, "params");
@@ -655,18 +683,18 @@ class Light extends Object3D {
 		}
 	}
 
-	function loadTexture( ctx : hide.prefab.EditContext, propsName : String, texture : h3d.mat.Texture, ?wrap : h3d.mat.Data.Wrap){
+	function loadTextureCustom(propsName : String, texture : h3d.mat.Texture, ?wrap : h3d.mat.Data.Wrap){
 		if(texture != null) texture.dispose();
 		if(propsName == null) return null;
-		texture = ctx.rootContext.loadTexture(propsName);
+		texture = shared.loadTexture(propsName);
 		texture.wrap = wrap == null ? Repeat : wrap;
 		return texture;
 	}
 
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "sun-o", name : "Light" };
 	}
 	#end
 
-	static var _ = Library.register("light", Light);
+	static var _ = Prefab.register("light", Light);
 }

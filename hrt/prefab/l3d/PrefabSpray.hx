@@ -1,20 +1,8 @@
 package hrt.prefab.l3d;
-import hrt.prefab.l3d.Spray;
-#if !editor
 
 class PrefabSpray extends Spray {
 
-	static var _ = Library.register("prefabSpray", PrefabSpray);
-
-}
-
-#else
-
-import h3d.Vector;
-import hxd.Key as K;
-
-class PrefabSpray extends Spray {
-
+	#if editor
 
 	var PREFAB_SPRAY_CONFIG_FILE = "prefabSprayProps.json";
 	var PREFAB_SPRAY_CONFIG_PATH(get, null) : String;
@@ -22,16 +10,16 @@ class PrefabSpray extends Spray {
 		return hide.Ide.inst.resourceDir + "/" + PREFAB_SPRAY_CONFIG_FILE;
 	}
 
-	override function save() {
+	override function save() : Dynamic {
 		clearPreview();
 		return super.save();
 	}
 
-	override function getHideProps() : HideProps {
+	override function getHideProps() : hide.prefab.HideProps {
 		return { icon : "paint-brush", name : "PrefabSpray", hideChildren : p -> return Std.isOfType(p, Object3D) };
 	}
 
-	override function edit( ectx : EditContext ) {
+	override function edit( ectx : hide.prefab.EditContext ) {
 
 		invParent = getAbsPos().clone();
 		invParent.invert();
@@ -88,7 +76,7 @@ class PrefabSpray extends Spray {
 						}
 						elt.val(newPath);
 						elt.html(extractItemName(newPath));
-						sceneEditor.refresh();
+						sceneEditor.queueRebuild(this);
 						undo.change(Custom(function(undo) {
 							if(undo) {
 								removeSourcePath(newPath);
@@ -101,7 +89,7 @@ class PrefabSpray extends Spray {
 								}
 								elt.val(path);
 								elt.html(extractItemName(path));
-								sceneEditor.refresh();
+								sceneEditor.queueRebuild(this);
 							}
 							else {
 								removeSourcePath(elt.val());
@@ -114,7 +102,7 @@ class PrefabSpray extends Spray {
 								}
 								elt.val(newPath);
 								elt.html(extractItemName(newPath));
-								sceneEditor.refresh();
+								sceneEditor.queueRebuild(this);
 							}
 						}));
 					}) },
@@ -308,16 +296,14 @@ class PrefabSpray extends Spray {
 		});
 
 		options.find("#toground").click(function(_) {
-			var ctx = ectx.getContext(this);
-			var mso = cast(ctx.local3d, Spray.SprayObject);
+			var mso = cast(local3d, Spray.SprayObject);
 			undo.change(Custom(function(undo) {
 			}));
 			for( c in this.children ) {
 				var obj = c.to(Object3D);
 				if( obj == null ) continue;
-				setGroundPos(ectx, obj);
-				var ctx = ectx.getContext(obj);
-				if( ctx != null ) obj.applyTransform(ctx.local3d);
+				setGroundPos(obj);
+				obj.applyTransform();
 				wasEdited = true;
 			}
 			mso.redraw();
@@ -339,7 +325,7 @@ class PrefabSpray extends Spray {
 					prefabs.push(c);
 				}
 				sceneEditor.deleteElements(prefabs);
-				cast(ectx.getContext(this).local3d, Spray.SprayObject).redraw();
+				cast(local3d, Spray.SprayObject).redraw();
 			}
 		});
 
@@ -391,7 +377,9 @@ class PrefabSpray extends Spray {
 		sceneEditor.properties.element.find("#repeatPrefab").prop("checked", CONFIG.dontRepeatItem);
 	}
 
-
+	override function flatten<T:Prefab>( ?cl : Class<T>, ?arr: Array<T> ) : Array<T> {
+		return flattenSpray(cl, arr);
+	}
 
 	override function addSourcePath(path : String) {
 		var source = { path: path, isRef : true };
@@ -399,8 +387,8 @@ class PrefabSpray extends Spray {
 			currentSources.push(source);
 	}
 
-	static var _ = Library.register("prefabSpray", PrefabSpray);
+	#end
+
+	static var _ = Prefab.register("prefabSpray", PrefabSpray);
 
 }
-
-#end

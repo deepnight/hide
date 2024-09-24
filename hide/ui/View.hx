@@ -12,19 +12,20 @@ typedef ViewOptions = { ?position : DisplayPosition, ?width : Int }
 @:keepSub @:allow(hide.Ide)
 class View<T> extends hide.comp.Component {
 
+	#if !hl
 	var container : golden.Container;
 	var containerView : golden.ContentItem;
-	var watches : Array<{ keep : Bool, path : String, callb : Void -> Void }> = [];
 	public var fullScreen(get,set) : Bool;
+	var contentWidth(get,never) : Int;
+	var contentHeight(get,never) : Int;
+	#end
+	var watches : Array<{ keep : Bool, path : String, callb : Void -> Void }> = [];
 	public var keys(get,null) : Keys;
 	public var state(default, null) : T;
 	public var undo(default, null) = new hide.ui.UndoHistory();
 	public var config(get, null) : Config;
 	public var viewClass(get, never) : String;
 	public var defaultOptions(get,never) : ViewOptions;
-
-	var contentWidth(get,never) : Int;
-	var contentHeight(get,never) : Int;
 	var needRebuild : Bool;
 
 	public function new(state:T) {
@@ -32,7 +33,9 @@ class View<T> extends hide.comp.Component {
 		element = null;
 		this.state = state;
 		ide = Ide.inst;
+		#if !hl
 		@:privateAccess ide.currentFullScreen = null;
+		#end
 	}
 
 	public function watch( filePath : String, onChange : Void -> Void, ?opts : { ?checkDelete : Bool, ?keepOnRebuild : Bool } ) {
@@ -57,7 +60,9 @@ class View<T> extends hide.comp.Component {
 	function get_keys() {
 		if( keys == null ) {
 			keys = new Keys(null);
+			#if js
 			keys.register("view.fullScreen", function() fullScreen = !fullScreen);
+			#end
 		}
 		return keys;
 	}
@@ -74,6 +79,7 @@ class View<T> extends hide.comp.Component {
 		return Type.getClassName(Type.getClass(this));
 	}
 
+	#if !hl
 	public function setClipboard( v : Dynamic, ?type : String, ?opts : {} ) {
 		nw.Clipboard.get().set(ide.toJSON({ type : type == null ? viewClass : type, value : v, opts : opts }));
 	}
@@ -145,6 +151,9 @@ class View<T> extends hide.comp.Component {
 			if( container.parent.parent.config == null ) return;
 			haxe.Timer.delay(onActivate,0);
 		});
+		container.on("hide", function(_) {
+			onHide();
+		});
 		container.getElement().keydown(function(e) {
 			processKeyEvent(e);
 		});
@@ -193,19 +202,22 @@ class View<T> extends hide.comp.Component {
 		element.off();
 		onDisplay();
 	}
+	#end
+
+	#if hl
+	public final function rebuild() {
+		onDisplay();
+	}
+	#end
 
 	function onDisplay() {
 		element.text(viewClass+(state == null ? "" : " "+state));
 	}
 
+	function onHide() {
+	}
+
 	public function onResize() {
-	}
-
-	public function onActivate() {
-	}
-
-	public function isActive() {
-		return container != null && !container.isHidden;
 	}
 
 	public function onDragDrop(items : Array<String>, isDrop : Bool) {
@@ -214,6 +226,17 @@ class View<T> extends hide.comp.Component {
 
 	function toString() {
 		return Type.getClassName(Type.getClass(this)) + (this.state == null ? "" : "("+haxe.Json.stringify(this.state)+")");
+	}
+
+	function get_defaultOptions() return viewClasses.get(Type.getClassName(Type.getClass(this))).options;
+
+	#if !hl
+
+	public function isActive() {
+		return container != null && !container.isHidden;
+	}
+
+	public function onActivate() {
 	}
 
 	/**
@@ -262,8 +285,6 @@ class View<T> extends hide.comp.Component {
 
 	function get_contentWidth() return container.width;
 	function get_contentHeight() return container.height;
-	function get_defaultOptions() return viewClasses.get(Type.getClassName(Type.getClass(this))).options;
-
 	function get_fullScreen() return container != null && container.getElement().is(".fullScreen");
 	function set_fullScreen(v) {
 		if( fullScreen == v )
@@ -277,6 +298,7 @@ class View<T> extends hide.comp.Component {
 		if( !ide.isCDB ) ide.setFullscreen(v);
 		return v;
 	}
+	#end
 
 	public static var viewClasses = new Map<String,{ name : String, cl : Class<View<Dynamic>>, options : ViewOptions }>();
 	public static function register<T>( cl : Class<View<T>>, ?options : ViewOptions ) {

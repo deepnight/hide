@@ -20,8 +20,14 @@ typedef GradientData = {
     var colorMode: Int;
 };
 
-class Gradient {
+#if editor
+typedef EditorCacheData = {
+	var oldHash : Int;
+	var tex : Texture;
+};
+#end
 
+class Gradient {
 
     public var data : GradientData = {
         stops: new Array<ColorStop>(),
@@ -122,6 +128,7 @@ class Gradient {
         return evalData(data, position, outVector);
     }
 
+	#if !editor
     static function getCache() : Map<Int32, h3d.mat.Texture> {
 		var engine = h3d.Engine.getCurrent();
 		var cache : Map<Int32, h3d.mat.Texture> = @:privateAccess engine.resCache.get(Gradient);
@@ -131,31 +138,52 @@ class Gradient {
 		}
         return cache;
     }
+	#end
 
-    public static function hashCombine(hash : Int32, newValue : Int32) : Int32 {
-        return hash ^ (newValue * 0x01000193);
-    }
+	#if editor
+	public static function getEditorCache() : Map<{}, EditorCacheData> {
+		var engine = h3d.Engine.getCurrent();
+		var cache : Map<{}, EditorCacheData> = @:privateAccess engine.resCache.get(Gradient);
+		if(cache == null) {
+			cache = new Map<{}, EditorCacheData>();
+			@:privateAccess engine.resCache.set(Gradient, cache);
+		}
+        return cache;
+	}
+
+	public static function purgeEditorCache() {
+		var cache = getEditorCache();
+		for (c in cache) {
+			if (c.tex != null) {
+				c.tex.dispose();
+			}
+		}
+		cache.clear();
+	}
+	#end
 
     public static function getDataHash(data : GradientData) : Int32 {
-        var hash = hashCombine(0, data.resolution);
-        hash = hashCombine(hash, data.isVertical ? 0 : 1);
+
+        var hash = hxd.Rand.hash(data.resolution);
+        hash = hxd.Rand.hash(data.isVertical ? 0 : 1, hash);
 
         // Vieux hack nul
-        hash = hashCombine(hash, (data.interpolation:String).charCodeAt(0));
-        hash = hashCombine(hash, (data.interpolation:String).charCodeAt(1));
+        hash = hxd.Rand.hash((data.interpolation:String).charCodeAt(0), hash);
+        hash = hxd.Rand.hash((data.interpolation:String).charCodeAt(1), hash);
 
-        hash = hashCombine(hash, data.colorMode);
+        hash = hxd.Rand.hash(data.colorMode, hash);
 
         for (stop in data.stops) {
-            hash = hashCombine(hash, stop.color);
-            hash = hashCombine(hash, Std.int(stop.position * 214748357));
-        };
+            hash =  hxd.Rand.hash(stop.color, hash);
+            hash = hxd.Rand.hash(Std.int(stop.position * 0x7FFFFFFF), hash);
+        }
         return hash;
     }
 
     public static function textureFromData(data : GradientData) : h3d.mat.Texture {
-        var hash = getDataHash(data);
 
+        var hash = getDataHash(data);
+		#if !editor
 
         var cache = getCache();
         var entry = cache.get(hash);
@@ -163,6 +191,19 @@ class Gradient {
         {
             return entry;
         }
+		#else
+		var cache = getEditorCache();
+		var entry = cache.get(data);
+		if (entry != null)
+		{
+			if (entry.oldHash == hash) {
+				return entry.tex;
+			}
+			else {
+				entry.tex.dispose();
+			}
+		}
+		#end
 
         #if !release
         var oldHash = Gradient.getDataHash(data);
@@ -181,7 +222,7 @@ class Gradient {
 
             var vec = new Vector4();
             for (x in 0...data.resolution) {
-                evalData(data, x / data.resolution, vec);
+                evalData(data, x / (data.resolution-1), vec);
                 pixels.setPixelF(x * xScale,x*yScale, vec);
             }
             return pixels;
@@ -195,6 +236,8 @@ class Gradient {
 
 		#if !editor
         cache.set(hash, texture);
+		#else
+		cache.set(data, {oldHash: hash, tex: texture});
 		#end
 
         return texture;
